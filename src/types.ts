@@ -60,14 +60,11 @@ export interface PressRelease {
   updatedAt?: Timestamp
 }
 
-export type RecipientStatus =
-  | 'queued'
-  | 'sent'
-  | 'delivered'
-  | 'opened'
-  | 'clicked'
-  | 'bounced'
-  | 'failed'
+/**
+ * 走 mail2000 SMTP 寄送，只能知道伺服器有沒有收下這封信，
+ * 沒有開信 / 點擊 / 退信回報。
+ */
+export type RecipientStatus = 'queued' | 'sent' | 'failed'
 
 export interface CampaignRecipient {
   contactId: string
@@ -76,8 +73,6 @@ export interface CampaignRecipient {
   outlet: string
   language: Language
   status: RecipientStatus
-  openedAt?: Timestamp
-  clickedAt?: Timestamp
   error?: string
 }
 
@@ -95,8 +90,5 @@ export interface Campaign {
     recipients: number
     sent: number
     failed: number
-    opened: number
-    clicked: number
-    bounced: number
   }
 }

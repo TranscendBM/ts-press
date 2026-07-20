@@ -1,22 +1,24 @@
 import { initializeApp } from 'firebase-admin/app'
 import { getAuth } from 'firebase-admin/auth'
-import { FieldValue, getFirestore, Timestamp } from 'firebase-admin/firestore'
+import { FieldValue, getFirestore } from 'firebase-admin/firestore'
 import { getStorage } from 'firebase-admin/storage'
-import { onCall, onRequest, HttpsError } from 'firebase-functions/v2/https'
+import { onCall, HttpsError } from 'firebase-functions/v2/https'
 import { onDocumentWritten } from 'firebase-functions/v2/firestore'
 import { defineSecret } from 'firebase-functions/params'
 import { setGlobalOptions } from 'firebase-functions/v2'
 import * as functionsV1 from 'firebase-functions/v1'
 import * as logger from 'firebase-functions/logger'
-import sgMail from '@sendgrid/mail'
-import { EventWebhook, EventWebhookHeader } from '@sendgrid/eventwebhook'
+import nodemailer from 'nodemailer'
 import { renderEmailHtml, renderEmailText } from './emailTemplate'
 
 initializeApp()
 setGlobalOptions({ region: 'asia-east1', maxInstances: 5 })
 
-const SENDGRID_API_KEY = defineSecret('SENDGRID_API_KEY')
-const SENDGRID_WEBHOOK_KEY = defineSecret('SENDGRID_WEBHOOK_KEY')
+// mail2000 的 SMTP 連線資訊，用 firebase functions:secrets:set 設定
+const SMTP_HOST = defineSecret('SMTP_HOST')
+const SMTP_PORT = defineSecret('SMTP_PORT')
+const SMTP_USER = defineSecret('SMTP_USER')
+const SMTP_PASS = defineSecret('SMTP_PASS')
 
 const db = getFirestore()
 
@@ -72,7 +74,7 @@ async function authorize(email: string | undefined, needsSendRole: boolean) {
   }
 }
 
-/** 從 Storage 抓附件並轉成 SendGrid 需要的 base64 格式。 */
+/** 從 Storage 抓附件，轉成 nodemailer 需要的格式。 */
 async function loadAttachments(
   files: { name: string; path: string; contentType?: string }[],
 ) {
@@ -82,10 +84,9 @@ async function loadAttachments(
     try {
       const [buf] = await bucket.file(f.path).download()
       out.push({
-        content: buf.toString('base64'),
         filename: f.name,
-        type: f.contentType || 'application/octet-stream',
-        disposition: 'attachment' as const,
+        content: buf,
+        contentType: f.contentType || 'application/octet-stream',
       })
     } catch (err) {
       logger.error('附件下載失敗', { path: f.path, err })
@@ -95,19 +96,14 @@ async function loadAttachments(
   return out
 }
 
-/** 小量併發，避免一次打爆 SendGrid。 */
-async function pooled<T>(
-  items: T[],
-  size: number,
-  worker: (item: T) => Promise<void>,
-) {
-  for (let i = 0; i < items.length; i += size) {
-    await Promise.all(items.slice(i, i + size).map(worker))
-  }
-}
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 export const sendCampaign = onCall<SendRequest>(
-  { secrets: [SENDGRID_API_KEY], timeoutSeconds: 540, memory: '512MiB' },
+  {
+    secrets: [SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS],
+    timeoutSeconds: 540,
+    memory: '512MiB',
+  },
   async (request) => {
     const { pressReleaseId, targetLists, isTest } = request.data ?? {}
     if (!pressReleaseId) {
@@ -182,6 +178,28 @@ export const sendCampaign = onCall<SendRequest>(
 
     const attachments = await loadAttachments(press.attachments ?? [])
 
+    const port = Number(SMTP_PORT.value()) || 587
+    const transporter = nodemailer.createTransport({
+      host: SMTP_HOST.value(),
+      port,
+      secure: port === 465,
+      auth: { user: SMTP_USER.value(), pass: SMTP_PASS.value() },
+      // 連線重複使用，避免每封信都重新握手被伺服器當成異常流量
+      pool: true,
+      maxConnections: 1,
+      maxMessages: 50,
+    })
+
+    try {
+      await transporter.verify()
+    } catch (err) {
+      logger.error('SMTP 連線失敗', err)
+      throw new HttpsError(
+        'unavailable',
+        'SMTP 伺服器連線失敗，請確認 mail2000 設定與是否允許外部連線。',
+      )
+    }
+
     // 先建立紀錄，讓前端可以即時看到進度
     const campaignRef = db.collection('campaigns').doc()
     await campaignRef.set({
@@ -193,14 +211,7 @@ export const sendCampaign = onCall<SendRequest>(
       sentBy: user.email,
       sentAt: FieldValue.serverTimestamp(),
       status: 'sending',
-      totals: {
-        recipients: recipients.length,
-        sent: 0,
-        failed: 0,
-        opened: 0,
-        clicked: 0,
-        bounced: 0,
-      },
+      totals: { recipients: recipients.length, sent: 0, failed: 0 },
     })
 
     const batch = db.batch()
@@ -216,12 +227,11 @@ export const sendCampaign = onCall<SendRequest>(
     }
     await batch.commit()
 
-    sgMail.setApiKey(SENDGRID_API_KEY.value())
-
     let sent = 0
     let failed = 0
 
-    await pooled(recipients, 5, async (r) => {
+    // 逐封寄送並稍作間隔，避免 mail2000 判定為濫發而阻擋
+    for (const r of recipients) {
       const version = press.versions[r.language]
       const templateInput = {
         subject: version.subject ?? '',
@@ -231,30 +241,14 @@ export const sendCampaign = onCall<SendRequest>(
         language: r.language,
       }
       try {
-        await sgMail.send({
-          to: { email: r.email, name: r.name || undefined },
-          from: {
-            email: SENDER_EMAIL,
-            name: SENDER_NAME_BY_LANG[r.language],
-          },
+        await transporter.sendMail({
+          to: r.name ? `"${r.name.replace(/"/g, '')}" <${r.email}>` : r.email,
+          from: `"${SENDER_NAME_BY_LANG[r.language]}" <${SENDER_EMAIL}>`,
           replyTo: SENDER_EMAIL,
           subject: `${isTest ? '[測試] ' : ''}${version.subject}`,
           text: renderEmailText(templateInput),
           html: renderEmailHtml(templateInput),
           attachments,
-          // webhook 回傳事件時用這兩個欄位對回收件人
-          customArgs: {
-            campaignId: campaignRef.id,
-            recipientId: r.id,
-          },
-          trackingSettings: {
-            openTracking: { enable: true },
-            clickTracking: { enable: true, enableText: false },
-          },
-          mailSettings: {
-            // 新聞稿是一人一封，關閉 SendGrid 的沙盒模式
-            sandboxMode: { enable: false },
-          },
         })
         sent += 1
         await campaignRef
@@ -263,16 +257,17 @@ export const sendCampaign = onCall<SendRequest>(
           .update({ status: 'sent' })
       } catch (err) {
         failed += 1
-        const detail =
-          (err as { response?: { body?: { errors?: { message: string }[] } } })
-            .response?.body?.errors?.[0]?.message ?? '寄送失敗'
+        const detail = (err as { message?: string }).message ?? '寄送失敗'
         logger.error('寄送失敗', { email: r.email, detail })
         await campaignRef
           .collection('recipients')
           .doc(r.id)
           .update({ status: 'failed', error: detail })
       }
-    })
+      await sleep(400)
+    }
+
+    transporter.close()
 
     await campaignRef.update({
       status: failed === recipients.length ? 'failed' : 'completed',
@@ -288,111 +283,6 @@ export const sendCampaign = onCall<SendRequest>(
     }
 
     return { campaignId: campaignRef.id, recipients: recipients.length }
-  },
-)
-
-/** 狀態只能往前推進，避免 delivered 事件蓋掉先前的 opened。 */
-const STATUS_RANK: Record<string, number> = {
-  queued: 0,
-  sent: 1,
-  delivered: 2,
-  opened: 3,
-  clicked: 4,
-  bounced: 5,
-  failed: 5,
-}
-
-const EVENT_TO_STATUS: Record<string, string> = {
-  delivered: 'delivered',
-  open: 'opened',
-  click: 'clicked',
-  bounce: 'bounced',
-  dropped: 'failed',
-  deferred: 'sent',
-  spamreport: 'bounced',
-}
-
-export const sendgridWebhook = onRequest(
-  { secrets: [SENDGRID_WEBHOOK_KEY], cors: false },
-  async (req, res) => {
-    if (req.method !== 'POST') {
-      res.status(405).send('Method Not Allowed')
-      return
-    }
-
-    // 驗證簽章，確認事件確實來自 SendGrid
-    try {
-      const ew = new EventWebhook()
-      const key = ew.convertPublicKeyToECDSA(SENDGRID_WEBHOOK_KEY.value())
-      const valid = ew.verifySignature(
-        key,
-        req.rawBody,
-        req.get(EventWebhookHeader.SIGNATURE()) as string,
-        req.get(EventWebhookHeader.TIMESTAMP()) as string,
-      )
-      if (!valid) {
-        logger.warn('webhook 簽章驗證失敗')
-        res.status(403).send('Forbidden')
-        return
-      }
-    } catch (err) {
-      logger.error('webhook 簽章驗證錯誤', err)
-      res.status(403).send('Forbidden')
-      return
-    }
-
-    const events = (Array.isArray(req.body) ? req.body : []) as {
-      event: string
-      campaignId?: string
-      recipientId?: string
-      timestamp?: number
-    }[]
-
-    for (const ev of events) {
-      const nextStatus = EVENT_TO_STATUS[ev.event]
-      if (!nextStatus || !ev.campaignId || !ev.recipientId) continue
-
-      const campaignRef = db.collection('campaigns').doc(ev.campaignId)
-      const recipientRef = campaignRef
-        .collection('recipients')
-        .doc(ev.recipientId)
-
-      try {
-        await db.runTransaction(async (tx) => {
-          const snap = await tx.get(recipientRef)
-          if (!snap.exists) return
-          const current = (snap.data()?.status as string) ?? 'queued'
-          if (STATUS_RANK[nextStatus] <= STATUS_RANK[current]) return
-
-          const when = ev.timestamp
-            ? Timestamp.fromMillis(ev.timestamp * 1000)
-            : Timestamp.now()
-
-          const patch: Record<string, unknown> = { status: nextStatus }
-          if (nextStatus === 'opened') patch.openedAt = when
-          if (nextStatus === 'clicked') patch.clickedAt = when
-          tx.update(recipientRef, patch)
-
-          // 每位收件人只計一次；點擊同時也算一次開信
-          if (nextStatus === 'opened') {
-            tx.update(campaignRef, { 'totals.opened': FieldValue.increment(1) })
-          } else if (nextStatus === 'clicked') {
-            tx.update(campaignRef, {
-              'totals.clicked': FieldValue.increment(1),
-              ...(STATUS_RANK[current] < STATUS_RANK.opened
-                ? { 'totals.opened': FieldValue.increment(1) }
-                : {}),
-            })
-          } else if (nextStatus === 'bounced') {
-            tx.update(campaignRef, { 'totals.bounced': FieldValue.increment(1) })
-          }
-        })
-      } catch (err) {
-        logger.error('webhook 事件處理失敗', { ev, err })
-      }
-    }
-
-    res.status(200).send('ok')
   },
 )
 

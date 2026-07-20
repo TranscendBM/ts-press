@@ -15,10 +15,14 @@
 | Firebase Auth | Google 登入，不限網域，但需在 `users` 白名單內 |
 | Firestore | 媒體名單、新聞稿、發送紀錄 |
 | Firebase Storage | 內嵌圖片與郵件附件 |
-| Cloud Functions | 發送邏輯、SendGrid 事件 webhook（需 Blaze 方案） |
-| SendGrid | 實際寄信、網域驗證、開信與點擊追蹤 |
+| Cloud Functions | 發送邏輯（需 Blaze 方案） |
+| mail2000 SMTP | 實際寄信 |
 
 寄件人固定為 `press_center@transcend-info.com`。
+
+> **關於追蹤**：本系統透過公司既有的 mail2000 郵件伺服器寄送，好處是不需要第三方服務、
+> 不必改 DNS、零成本；代價是**沒有開信率、點擊率與退信回報**，只能知道 SMTP 伺服器
+> 是否成功收下每一封信。退信會以一般郵件的形式回到 `press_center@transcend-info.com` 信箱。
 
 ---
 
@@ -71,27 +75,26 @@ Firestore → 建立集合 `users` → 文件 ID 填**你登入用的那個 Goog
 - `manager` 主管 — 正式發送
 - `editor` 編輯 — 編輯名單與稿件，只能寄測試信
 
-### 4. SendGrid 設定
+### 4. mail2000 SMTP
 
-1. 註冊 [SendGrid](https://sendgrid.com/) 帳號（每月 100 封以內免費；用量更大再升級）。
-2. **Settings → Sender Authentication → Authenticate Your Domain**，網域填 `transcend-info.com`。
-   SendGrid 會產生數筆 CNAME 紀錄，**請 IT 加到 transcend-info.com 的 DNS**。
+向 IT 取得 `press_center@transcend-info.com` 的 SMTP 連線資訊，並確認兩件事：
 
-   > 這些是 DNS 層的 SPF/DKIM 設定，**不會影響 mail2000 的正常收發信**（收信的 MX 紀錄維持不變）。
-   > 驗證通過後，從 `press_center@transcend-info.com` 寄出的信才不會被判定為垃圾信。
-
-3. **Settings → API Keys** 建立一組 Full Access 金鑰，複製起來（只會顯示一次）。
-4. **Settings → Mail Settings → Event Webhook**：
-   - HTTP POST URL 填 `https://<你的網域>/api/sendgrid-webhook`
-   - 勾選事件：`Delivered`、`Opened`、`Clicked`、`Bounced`、`Dropped`、`Spam Reports`
-   - 開啟 **Signed Event Webhook**，複製產生的 Verification Key
+- **mail2000 允許從外部 IP 以 SMTP 認證寄信**。Cloud Functions 跑在 Google 機房，
+  對 mail2000 而言是外部連線；若伺服器只開放內網轉寄，這套方案無法運作。
+- **不需要 IP 白名單**。Cloud Functions 的對外 IP 是浮動的，若 IT 堅持要鎖 IP，
+  必須另外架設 VPC 連接器與 Cloud NAT 取得固定 IP（會產生額外費用）。
 
 ### 5. 設定密鑰
 
 ```bash
-npx firebase functions:secrets:set SENDGRID_API_KEY      # 貼上第 3 步的 API Key
-npx firebase functions:secrets:set SENDGRID_WEBHOOK_KEY  # 貼上第 4 步的 Verification Key
+npx firebase functions:secrets:set SMTP_HOST   # 例如 mail.transcend-info.com
+npx firebase functions:secrets:set SMTP_PORT   # 587（STARTTLS）或 465（SSL）
+npx firebase functions:secrets:set SMTP_USER   # press_center@transcend-info.com
+npx firebase functions:secrets:set SMTP_PASS   # 該信箱的密碼
 ```
+
+> 密碼只存在 Google Secret Manager，不會進版控。發送前程式會先 `verify()` 連線，
+> 連不上會直接回報錯誤而不會送出半套。
 
 ### 6. 部署
 
@@ -120,7 +123,7 @@ users/{email}                       白名單與角色
 mediaContacts/{id}                  媒體聯絡人（lists 複選、language 決定收到哪個版本）
 pressReleases/{id}                  新聞稿（versions.tw / .www / .us、attachments 共用）
 campaigns/{id}                      每次發送
-campaigns/{id}/recipients/{id}      每位收件人的送達與開信狀態
+campaigns/{id}/recipients/{id}      每位收件人的送出結果（queued / sent / failed）
 ```
 
 `campaigns` 只能由 Cloud Functions 寫入，前端唯讀。
@@ -130,6 +133,8 @@ campaigns/{id}/recipients/{id}      每位收件人的送達與開信狀態
 - **附件總大小上限 10MB**，超過多數郵件伺服器會直接退信；系統會在編輯頁擋下。
 - 有收件人要收的語言版本若沒填完，系統會擋住發送，避免寄出空白信。
 - 正式發送前請務必先用「寄測試信給我」確認排版、圖片與附件。
+- 寄送是**逐封循序送出並間隔 0.4 秒**，避免 mail2000 判定為濫發而阻擋。
+  50 封大約需要 30 秒，Function 逾時設定為 540 秒。
 - 修改 email 樣板時，`src/lib/emailTemplate.ts` 與 `functions/src/emailTemplate.ts` 兩份內容必須一致
   （前者供前端預覽，後者供實際寄送）。
 - Storage 安全規則讀不到 Firestore，改看 token 的 `pressCenter` custom claim。這個 claim 由

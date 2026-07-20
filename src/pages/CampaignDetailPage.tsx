@@ -12,10 +12,6 @@ import { formatDate } from '../lib/helpers'
 const STATUS_LABELS: Record<RecipientStatus, string> = {
   queued: '待送出',
   sent: '已送出',
-  delivered: '已送達',
-  opened: '已開信',
-  clicked: '已點擊',
-  bounced: '退信',
   failed: '失敗',
 }
 
@@ -24,11 +20,7 @@ const STATUS_TONES: Record<
   'slate' | 'blue' | 'green' | 'amber' | 'red'
 > = {
   queued: 'slate',
-  sent: 'slate',
-  delivered: 'blue',
-  opened: 'green',
-  clicked: 'green',
-  bounced: 'red',
+  sent: 'green',
   failed: 'red',
 }
 
@@ -60,16 +52,7 @@ export default function CampaignDetailPage() {
     return <p className="p-16 text-center text-sm text-slate-400">載入中…</p>
   }
 
-  const t = campaign.totals ?? {
-    recipients: 0,
-    sent: 0,
-    failed: 0,
-    opened: 0,
-    clicked: 0,
-    bounced: 0,
-  }
-  const pct = (n: number) =>
-    t.recipients === 0 ? '—' : `${Math.round((n / t.recipients) * 100)}%`
+  const t = campaign.totals ?? { recipients: 0, sent: 0, failed: 0 }
 
   return (
     <>
@@ -85,15 +68,10 @@ export default function CampaignDetailPage() {
       />
 
       <div className="space-y-6 p-8">
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+        <div className="grid grid-cols-3 gap-4">
           <Stat label="收件人" value={String(t.recipients)} />
           <Stat label="成功送出" value={String(t.sent)} />
-          <Stat label="開信" value={`${t.opened} (${pct(t.opened)})`} />
-          <Stat label="點擊" value={`${t.clicked} (${pct(t.clicked)})`} />
-          <Stat
-            label="退信 / 失敗"
-            value={String((t.bounced ?? 0) + (t.failed ?? 0))}
-          />
+          <Stat label="失敗" value={String(t.failed ?? 0)} />
         </div>
 
         <div className="rounded-xl border border-slate-200 bg-white p-5 text-sm">
@@ -118,7 +96,6 @@ export default function CampaignDetailPage() {
                 <th className="px-4 py-3 font-medium">媒體</th>
                 <th className="px-4 py-3 font-medium">語言</th>
                 <th className="px-4 py-3 font-medium">狀態</th>
-                <th className="px-4 py-3 font-medium">開信時間</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -135,9 +112,6 @@ export default function CampaignDetailPage() {
                     {r.error && (
                       <div className="mt-1 text-xs text-red-500">{r.error}</div>
                     )}
-                  </td>
-                  <td className="px-4 py-3 text-slate-500">
-                    {r.openedAt ? formatDate(r.openedAt) : '—'}
                   </td>
                 </tr>
               ))}

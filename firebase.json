@@ -19,10 +19,6 @@
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
     "rewrites": [
       {
-        "source": "/api/sendgrid-webhook",
-        "function": "sendgridWebhook"
-      },
-      {
         "source": "**",
         "destination": "/index.html"
       }

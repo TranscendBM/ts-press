@@ -32,7 +32,7 @@ export default function CampaignsPage() {
     <>
       <PageHeader
         title="發送紀錄"
-        description="每次發送的收件人、開信與點擊狀況。"
+        description="每次發送的收件人與送出結果。透過 mail2000 寄送，沒有開信與點擊追蹤。"
         actions={
           <label className="flex items-center gap-2 text-sm text-slate-600">
             <input
@@ -63,16 +63,14 @@ export default function CampaignsPage() {
                   <th className="px-4 py-3 font-medium">名單</th>
                   <th className="px-4 py-3 font-medium">發送時間</th>
                   <th className="px-4 py-3 font-medium">收件人</th>
-                  <th className="px-4 py-3 font-medium">開信率</th>
-                  <th className="px-4 py-3 font-medium">點擊率</th>
+                  <th className="px-4 py-3 font-medium">成功 / 失敗</th>
                   <th className="px-4 py-3 font-medium">狀態</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {visible.map((c) => {
                   const total = c.totals?.recipients || 0
-                  const rate = (n: number) =>
-                    total === 0 ? '—' : `${Math.round((n / total) * 100)}%`
+                  const failed = c.totals?.failed ?? 0
                   return (
                     <tr
                       key={c.id}
@@ -100,10 +98,10 @@ export default function CampaignsPage() {
                       </td>
                       <td className="px-4 py-3 text-slate-600">{total}</td>
                       <td className="px-4 py-3 font-medium text-slate-800">
-                        {rate(c.totals?.opened ?? 0)}
-                      </td>
-                      <td className="px-4 py-3 font-medium text-slate-800">
-                        {rate(c.totals?.clicked ?? 0)}
+                        {c.totals?.sent ?? 0}
+                        {failed > 0 && (
+                          <span className="text-red-600"> / {failed}</span>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <Badge
