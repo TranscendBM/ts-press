@@ -247,6 +247,7 @@ export const sendCampaign = onCall<SendRequest>(
       ({} as {
         logoUrl?: string
         contacts?: Record<Language, PressContact>
+        about?: Record<Language, { text?: string; link?: string }>
       })
 
     /** 依名單展開收件人，同一個 email 只留一份。 */
@@ -377,6 +378,8 @@ export const sendCampaign = onCall<SendRequest>(
         releaseDate: press.releaseDate,
         logoUrl: emailSettings.logoUrl,
         contact: emailSettings.contacts?.[r.language],
+        about: emailSettings.about?.[r.language]?.text,
+        aboutLink: emailSettings.about?.[r.language]?.link,
       }
       try {
         await transporter.sendMail({

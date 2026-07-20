@@ -34,6 +34,10 @@ export interface TemplateInput {
   logoUrl?: string
   /** 該語言版本的新聞聯絡人。 */
   contact?: PressContact
+  /** 公司簡介。留空則用內建的預設文字。 */
+  about?: string
+  /** 公司簡介末尾的網址。留空則用內建預設。 */
+  aboutLink?: string
 }
 
 const MONTHS_EN = [
@@ -80,6 +84,16 @@ const COPY = {
 const FONT_TW =
   "'Helvetica Neue',Helvetica,Arial,'Microsoft JhengHei','Noto Sans TC',sans-serif"
 const FONT_EN = "'Helvetica Neue',Helvetica,Arial,sans-serif"
+
+/** 後台「關於創見」欄位留空時使用的預設文字，也用來預先填入編輯欄位。 */
+export const DEFAULT_ABOUT: Record<
+  TemplateInput['language'],
+  { text: string; link: string }
+> = {
+  tw: { text: COPY.tw.about, link: COPY.tw.aboutLink },
+  www: { text: COPY.www.about, link: COPY.www.aboutLink },
+  us: { text: COPY.us.about, link: COPY.us.aboutLink },
+}
 
 export function escapeHtml(text: string): string {
   return text
@@ -140,6 +154,9 @@ export function renderEmailHtml(input: TemplateInput): string {
 
   const blocks = renderBlocks(input.bodyText, font)
   const dateLine = formatReleaseDate(input.releaseDate, input.language)
+  // 後台沒填就用內建預設，確保信件永遠有公司簡介
+  const aboutText = input.about?.trim() || copy.about
+  const aboutLink = input.aboutLink?.trim() || copy.aboutLink
 
   // 圖片置中插在開頭段落之後：讀者先讀完導言、正要往下時看到產品圖。
   // 不用兩欄並排 —— 260px 圖擠在 600px 版面裡會讓文字欄只剩 320px，
@@ -233,8 +250,10 @@ export function renderEmailHtml(input: TemplateInput): string {
           copy.aboutTitle,
         )}</p>
         <p style="margin:0;font-size:12px;line-height:1.7;color:#8a919e;font-family:${font};">
-          ${escapeHtml(copy.about)}
-          <a href="${copy.aboutLink}" style="color:${BRAND_COLOR};text-decoration:none;">${copy.aboutLink}</a>
+          ${escapeHtml(aboutText).replace(/\n/g, '<br>')}
+          <a href="${escapeHtml(aboutLink)}" style="color:${BRAND_COLOR};text-decoration:none;">${escapeHtml(
+            aboutLink,
+          )}</a>
         </p>
       </td></tr>
 

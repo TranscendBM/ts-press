@@ -3,9 +3,10 @@ import { doc, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore'
 import { Contact, ImageIcon, Upload } from 'lucide-react'
 import { db } from '../lib/firebase'
 import { uploadBrandingFile } from '../lib/storage'
-import { Button, Field, TextInput } from './ui'
+import { Button, Field, TextArea, TextInput } from './ui'
 import { LANGUAGES, LANGUAGE_LABELS, type Language } from '../constants'
-import type { EmailSettings, PressContact } from '../types'
+import { DEFAULT_ABOUT } from '../lib/emailTemplate'
+import type { AboutBlock, EmailSettings, PressContact } from '../types'
 
 const BLANK: PressContact = { name: '', company: '', email: '', phone: '' }
 
@@ -16,9 +17,16 @@ function blankContacts(): Record<Language, PressContact> {
   >
 }
 
+function blankAbout(): Record<Language, AboutBlock> {
+  return Object.fromEntries(
+    LANGUAGES.map((l) => [l, { text: '', link: '' }]),
+  ) as Record<Language, AboutBlock>
+}
+
 export default function PressContactsCard() {
   const [logoUrl, setLogoUrl] = useState('')
   const [contacts, setContacts] = useState(blankContacts())
+  const [about, setAbout] = useState(blankAbout())
   const [saved, setSaved] = useState<EmailSettings | null>(null)
   const [saving, setSaving] = useState(false)
   const [uploading, setUploading] = useState(false)
@@ -66,6 +74,7 @@ export default function PressContactsCard() {
       setSaved(d)
       setLogoUrl(d.logoUrl ?? '')
       setContacts({ ...blankContacts(), ...(d.contacts ?? {}) })
+      setAbout({ ...blankAbout(), ...(d.about ?? {}) })
     })
   }, [])
 
@@ -76,6 +85,10 @@ export default function PressContactsCard() {
     }))
   }
 
+  function patchAbout(lang: Language, field: keyof AboutBlock, value: string) {
+    setAbout((prev) => ({ ...prev, [lang]: { ...prev[lang], [field]: value } }))
+  }
+
   async function save() {
     setSaving(true)
     setMessage('')
@@ -83,7 +96,12 @@ export default function PressContactsCard() {
       await Promise.all([
         setDoc(
           doc(db, 'settings', 'email'),
-          { logoUrl: logoUrl.trim(), contacts, updatedAt: serverTimestamp() },
+          {
+            logoUrl: logoUrl.trim(),
+            contacts,
+            about,
+            updatedAt: serverTimestamp(),
+          },
           { merge: true },
         ),
         setDoc(
@@ -104,7 +122,9 @@ export default function PressContactsCard() {
     logoUrl.trim() !== (saved?.logoUrl ?? '') ||
     uiLogoUrl.trim() !== savedUiLogo ||
     JSON.stringify(contacts) !==
-      JSON.stringify({ ...blankContacts(), ...(saved?.contacts ?? {}) })
+      JSON.stringify({ ...blankContacts(), ...(saved?.contacts ?? {}) }) ||
+    JSON.stringify(about) !==
+      JSON.stringify({ ...blankAbout(), ...(saved?.about ?? {}) })
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-6">
@@ -280,6 +300,42 @@ export default function PressContactsCard() {
                   }
                 />
               </Field>
+            </div>
+
+            <div className="mt-4 max-w-2xl border-t border-slate-100 pt-4">
+              <Field
+                label="關於創見（信件頁尾）"
+                hint="留空則使用系統內建的預設文字。"
+              >
+                <TextArea
+                  rows={4}
+                  value={about[l].text}
+                  onChange={(e) => patchAbout(l, 'text', e.target.value)}
+                  placeholder={DEFAULT_ABOUT[l].text}
+                />
+              </Field>
+              <div className="mt-3 flex items-end gap-2">
+                <div className="flex-1">
+                  <Field label="末尾連結">
+                    <TextInput
+                      value={about[l].link}
+                      onChange={(e) => patchAbout(l, 'link', e.target.value)}
+                      placeholder={DEFAULT_ABOUT[l].link}
+                    />
+                  </Field>
+                </div>
+                <Button
+                  onClick={() =>
+                    setAbout((prev) => ({
+                      ...prev,
+                      [l]: { ...DEFAULT_ABOUT[l] },
+                    }))
+                  }
+                  className="shrink-0"
+                >
+                  帶入預設文字
+                </Button>
+              </div>
             </div>
           </div>
         ))}

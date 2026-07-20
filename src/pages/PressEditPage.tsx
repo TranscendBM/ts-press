@@ -195,6 +195,8 @@ export default function PressEditPage() {
     releaseDate: press.releaseDate,
     logoUrl: emailSettings?.logoUrl,
     contact: emailSettings?.contacts?.[lang],
+    about: emailSettings?.about?.[lang]?.text,
+    aboutLink: emailSettings?.about?.[lang]?.link,
   }
   const downloadName = `${press.title || '新聞稿'}_${lang}`
 

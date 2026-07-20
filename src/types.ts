@@ -61,10 +61,17 @@ export interface PressContact {
   phone: string
 }
 
+/** 信件頁尾的公司簡介，每個語言版本可各自維護。 */
+export interface AboutBlock {
+  text: string
+  link: string
+}
+
 export interface EmailSettings {
   /** 頁首 logo，建議透明背景 PNG。 */
   logoUrl?: string
   contacts?: Record<Language, PressContact>
+  about?: Record<Language, AboutBlock>
 }
 
 export interface PressRelease {
