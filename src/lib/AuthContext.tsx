@@ -14,15 +14,13 @@ import {
 } from 'firebase/auth'
 import { doc, getDoc } from 'firebase/firestore'
 import { auth, db, googleProvider } from './firebase'
-import { ALLOWED_DOMAIN } from '../constants'
 import type { AppUser } from '../types'
 
 /**
- * 登入失敗的原因，用來在登入頁顯示對應說明：
- * - wrong-domain：不是公司帳號
- * - not-whitelisted：是公司帳號但沒有被加進 users 白名單（或被停用）
+ * 登入被拒的原因。任何 Google 帳號都能按登入，
+ * 但只有被加進 users 白名單（且未停用）的 email 才進得來。
  */
-export type AuthDenial = 'wrong-domain' | 'not-whitelisted' | null
+export type AuthDenial = 'not-whitelisted' | null
 
 interface AuthState {
   firebaseUser: User | null
@@ -52,16 +50,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return
       }
 
-      const email = user.email ?? ''
-      if (!email.toLowerCase().endsWith(`@${ALLOWED_DOMAIN}`)) {
-        setDenial('wrong-domain')
-        await signOut(auth)
-        setLoading(false)
-        return
-      }
+      const email = (user.email ?? '').toLowerCase()
 
       // 白名單文件的 id 就是 email
-      const snap = await getDoc(doc(db, 'users', email.toLowerCase()))
+      const snap = await getDoc(doc(db, 'users', email))
       const data = snap.exists() ? (snap.data() as AppUser) : null
 
       if (!data || data.active === false) {
@@ -69,6 +61,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         await signOut(auth)
         setLoading(false)
         return
+      }
+
+      // 後端 trigger 會依白名單寫入 pressCenter custom claim，
+      // 首次登入時 token 還沒有它，強制刷新一次才能通過 Storage 規則。
+      try {
+        await user.getIdToken(true)
+      } catch {
+        // 刷新失敗不擋登入，最多是這次 session 無法上傳檔案
       }
 
       setDenial(null)
@@ -86,11 +86,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       denial,
       signIn: async () => {
         setDenial(null)
-        // hd 只是提示 Google 優先顯示公司帳號，實際仍以上面的網域檢查為準
-        googleProvider.setCustomParameters({
-          prompt: 'select_account',
-          hd: ALLOWED_DOMAIN,
-        })
         await signInWithPopup(auth, googleProvider)
       },
       logout: async () => {

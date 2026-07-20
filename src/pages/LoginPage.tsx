@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { Mail, ShieldAlert } from 'lucide-react'
 import { useAuth } from '../lib/AuthContext'
-import { ALLOWED_DOMAIN } from '../constants'
 
 export default function LoginPage() {
   const { signIn, denial } = useAuth()
@@ -38,11 +37,6 @@ export default function LoginPage() {
           </p>
         </div>
 
-        {denial === 'wrong-domain' && (
-          <Notice>
-            請使用 <b>@{ALLOWED_DOMAIN}</b> 的公司 Google 帳號登入。
-          </Notice>
-        )}
         {denial === 'not-whitelisted' && (
           <Notice>
             這個帳號尚未被授權使用本系統，請聯絡管理員將你加入名單。
@@ -60,7 +54,7 @@ export default function LoginPage() {
         </button>
 
         <p className="mt-6 text-center text-xs text-slate-400">
-          僅限 @{ALLOWED_DOMAIN} 帳號，且需由管理員授權。
+          需由管理員將你的 Google 帳號加入名單才能使用。
         </p>
       </div>
     </div>

@@ -8,10 +8,10 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/users/$(request.auth.token.email)).data;
     }
 
+    // 登入不限網域，users 白名單就是唯一的門
     function isWhitelisted() {
       return request.auth != null
         && request.auth.token.email_verified == true
-        && request.auth.token.email.matches('.*@transcend-info[.]com$')
         && exists(/databases/$(database)/documents/users/$(request.auth.token.email))
         && userDoc().active == true;
     }

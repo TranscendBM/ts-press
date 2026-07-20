@@ -56,7 +56,11 @@ export const ROLE_LABELS: Record<Role, string> = {
 }
 
 export const SENDER_EMAIL = 'press_center@transcend-info.com'
-export const ALLOWED_DOMAIN = 'transcend-info.com'
+
+/**
+ * 登入不限網域（公司信箱用 mail2000，沒有對應的 Google 帳號），
+ * 改由 users 白名單決定誰進得來，個人 Google 帳號也可以。
+ */
 
 /** 附件總大小上限（10MB），超過會被多數郵件伺服器退回。 */
 export const MAX_ATTACHMENT_TOTAL_BYTES = 10 * 1024 * 1024

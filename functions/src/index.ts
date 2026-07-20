@@ -1,9 +1,12 @@
 import { initializeApp } from 'firebase-admin/app'
+import { getAuth } from 'firebase-admin/auth'
 import { FieldValue, getFirestore, Timestamp } from 'firebase-admin/firestore'
 import { getStorage } from 'firebase-admin/storage'
 import { onCall, onRequest, HttpsError } from 'firebase-functions/v2/https'
+import { onDocumentWritten } from 'firebase-functions/v2/firestore'
 import { defineSecret } from 'firebase-functions/params'
 import { setGlobalOptions } from 'firebase-functions/v2'
+import * as functionsV1 from 'firebase-functions/v1'
 import * as logger from 'firebase-functions/logger'
 import sgMail from '@sendgrid/mail'
 import { EventWebhook, EventWebhookHeader } from '@sendgrid/eventwebhook'
@@ -24,7 +27,6 @@ const SENDER_NAME_BY_LANG = {
   us: 'Transcend Press Center',
 } as const
 
-const ALLOWED_DOMAIN = 'transcend-info.com'
 const LANGUAGES = ['tw', 'www', 'us'] as const
 type Language = (typeof LANGUAGES)[number]
 
@@ -52,8 +54,8 @@ interface SendRequest {
 
 /** 確認呼叫者在白名單內；正式發送另外要求 admin / manager。 */
 async function authorize(email: string | undefined, needsSendRole: boolean) {
-  if (!email || !email.toLowerCase().endsWith(`@${ALLOWED_DOMAIN}`)) {
-    throw new HttpsError('permission-denied', '請使用公司帳號登入。')
+  if (!email) {
+    throw new HttpsError('permission-denied', '請先登入。')
   }
   const snap = await db.collection('users').doc(email.toLowerCase()).get()
   const user = snap.data()
@@ -393,3 +395,48 @@ export const sendgridWebhook = onRequest(
     res.status(200).send('ok')
   },
 )
+
+/**
+ * Storage 安全規則讀不到 Firestore，只能看 token 裡的 custom claim，
+ * 所以要把 users 白名單同步成 `pressCenter` claim。
+ * 兩個時間點都要處理：白名單異動時、以及使用者第一次登入建立帳號時。
+ */
+async function applyClaim(email: string, allowed: boolean) {
+  try {
+    const user = await getAuth().getUserByEmail(email)
+    const current = user.customClaims ?? {}
+    if (!!current.pressCenter === allowed) return
+    await getAuth().setCustomUserClaims(user.uid, {
+      ...current,
+      pressCenter: allowed,
+    })
+    logger.info('已更新 pressCenter claim', { email, allowed })
+  } catch (err) {
+    // 使用者還沒登入過就沒有 Auth 帳號，等他首次登入時由 onUserCreated 補上
+    if ((err as { code?: string }).code !== 'auth/user-not-found') {
+      logger.error('更新 claim 失敗', { email, err })
+    }
+  }
+}
+
+/** 白名單新增 / 停用 / 刪除時，同步調整 claim。 */
+export const syncUserClaims = onDocumentWritten(
+  'users/{email}',
+  async (event) => {
+    const email = event.params.email.toLowerCase()
+    const after = event.data?.after?.data()
+    await applyClaim(email, !!after && after.active !== false)
+  },
+)
+
+/** 使用者首次登入建立 Auth 帳號時，依白名單決定要不要給 claim。 */
+export const onUserCreated = functionsV1
+  .region('asia-east1')
+  .auth.user()
+  .onCreate(async (user) => {
+    const email = (user.email ?? '').toLowerCase()
+    if (!email) return
+    const snap = await db.collection('users').doc(email).get()
+    const allowed = snap.exists && snap.data()?.active !== false
+    await applyClaim(email, allowed)
+  })

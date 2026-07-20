@@ -12,7 +12,7 @@ import { db } from '../lib/firebase'
 import { useAuth } from '../lib/AuthContext'
 import PageHeader from '../components/PageHeader'
 import { Badge, Button, Field, Modal, Select, TextInput } from '../components/ui'
-import { ALLOWED_DOMAIN, ROLES, ROLE_LABELS, type Role } from '../constants'
+import { ROLES, ROLE_LABELS, type Role } from '../constants'
 import type { AppUser } from '../types'
 
 export default function SettingsPage() {
@@ -43,8 +43,8 @@ export default function SettingsPage() {
 
   async function save() {
     const email = draft.email.trim().toLowerCase()
-    if (!email.endsWith(`@${ALLOWED_DOMAIN}`)) {
-      setError(`只能加入 @${ALLOWED_DOMAIN} 的帳號。`)
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      setError('請輸入正確的 Email 格式。')
       return
     }
     setSaving(true)
@@ -89,7 +89,7 @@ export default function SettingsPage() {
     <>
       <PageHeader
         title="使用者管理"
-        description="只有名單內的公司帳號可以登入。管理員與主管可以按下正式發送。"
+        description="只有名單內的 Google 帳號可以登入。管理員與主管可以按下正式發送。"
         actions={
           <Button variant="primary" onClick={() => setOpen(true)}>
             <Plus className="size-4" />
@@ -185,11 +185,14 @@ export default function SettingsPage() {
               {error}
             </div>
           )}
-          <Field label="公司 Email" hint={`必須是 @${ALLOWED_DOMAIN}`}>
+          <Field
+            label="Google 帳號 Email"
+            hint="要跟對方登入時使用的 Google 帳號完全一致。"
+          >
             <TextInput
               value={draft.email}
               onChange={(e) => setDraft({ ...draft, email: e.target.value })}
-              placeholder={`someone@${ALLOWED_DOMAIN}`}
+              placeholder="someone@gmail.com"
             />
           </Field>
           <Field label="顯示名稱">

@@ -12,7 +12,7 @@
 | 層 | 用途 |
 |---|---|
 | Firebase Hosting | 前端管理後台（React + Vite + Tailwind） |
-| Firebase Auth | Google 登入，限 `@transcend-info.com` 且需在白名單內 |
+| Firebase Auth | Google 登入，不限網域，但需在 `users` 白名單內 |
 | Firestore | 媒體名單、新聞稿、發送紀錄 |
 | Firebase Storage | 內嵌圖片與郵件附件 |
 | Cloud Functions | 發送邏輯、SendGrid 事件 webhook（需 Blaze 方案） |
@@ -49,16 +49,19 @@ cp .env.example .env.local    # 填入 6 個 VITE_FIREBASE_* 值
 
 ### 3. 建立第一位管理員
 
-Firestore 安全規則要求使用者必須在 `users` 白名單內，所以**第一位管理員要手動在 Console 建立**：
+公司信箱使用 mail2000、沒有 Google Workspace 帳號，因此**登入不限網域**，個人 Google 帳號也可以，
+由 `users` 白名單決定誰進得來。也因為安全規則要求白名單，**第一位管理員必須手動在 Console 建立**：
 
-Firestore → 建立集合 `users` → 文件 ID 填你的公司 email（全小寫），欄位：
+Firestore → 建立集合 `users` → 文件 ID 填**你登入用的那個 Google 帳號 email**（全小寫），欄位：
 
 | 欄位 | 型別 | 值 |
 |---|---|---|
-| `email` | string | `你的帳號@transcend-info.com` |
+| `email` | string | 同文件 ID |
 | `displayName` | string | 你的名字 |
 | `role` | string | `admin` |
 | `active` | boolean | `true` |
+
+> 文件 ID 必須與登入的 Google 帳號完全一致，打錯就進不去。
 
 之後其他人就能在系統的「使用者管理」頁面新增。
 
@@ -129,3 +132,6 @@ campaigns/{id}/recipients/{id}      每位收件人的送達與開信狀態
 - 正式發送前請務必先用「寄測試信給我」確認排版、圖片與附件。
 - 修改 email 樣板時，`src/lib/emailTemplate.ts` 與 `functions/src/emailTemplate.ts` 兩份內容必須一致
   （前者供前端預覽，後者供實際寄送）。
+- Storage 安全規則讀不到 Firestore，改看 token 的 `pressCenter` custom claim。這個 claim 由
+  `syncUserClaims`（白名單異動時）與 `onUserCreated`（首次登入時）兩個 function 自動同步，
+  前端在登入後會強制刷新一次 token 取得它。**若這兩個 function 沒部署，上傳圖片與附件會失敗。**

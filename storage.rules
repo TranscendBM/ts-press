@@ -3,17 +3,19 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
 
-    function isCompanyUser() {
+    // Storage 規則讀不到 Firestore，所以改用 custom claim。
+    // 這個 claim 由 functions 的 syncUserClaims / onUserCreated 依 users 白名單寫入。
+    function isPressCenterUser() {
       return request.auth != null
         && request.auth.token.email_verified == true
-        && request.auth.token.email.matches('.*@transcend-info[.]com$');
+        && request.auth.token.pressCenter == true;
     }
 
     // 新聞稿的內嵌圖與附件
     match /press/{pressId}/{allPaths=**} {
-      allow read: if isCompanyUser();
-      // 單檔 10MB 上限，且僅允許圖片與常見文件格式
-      allow write: if isCompanyUser()
+      allow read: if isPressCenterUser();
+      // 單檔 10MB 上限
+      allow write: if isPressCenterUser()
         && request.resource.size < 10 * 1024 * 1024;
     }
   }
