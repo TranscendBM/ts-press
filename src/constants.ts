@@ -9,7 +9,7 @@ export const LANGUAGE_LABELS: Record<Language, string> = {
 }
 
 /** 媒體名單。發送時由使用者手動勾選。 */
-export const LISTS = ['tw_pr', 'tw_ir', 'global_pr', 'us_pr'] as const
+export const LISTS = ['tw_pr', 'tw_ir', 'global_pr', 'us_pr', 'test'] as const
 export type ListId = (typeof LISTS)[number]
 
 export const LIST_LABELS: Record<ListId, string> = {
@@ -17,6 +17,7 @@ export const LIST_LABELS: Record<ListId, string> = {
   tw_ir: '台灣 IR',
   global_pr: 'Global PR',
   us_pr: '美國 PR',
+  test: '測試名單',
 }
 
 /** 名單預設對應的語言版本，新增聯絡人時作為預設值。 */
@@ -25,7 +26,11 @@ export const LIST_DEFAULT_LANGUAGE: Record<ListId, Language> = {
   tw_ir: 'tw',
   global_pr: 'www',
   us_pr: 'us',
+  test: 'tw',
 }
+
+/** 內部測試用，不是真的媒體，介面上要標示清楚避免誤發。 */
+export const INTERNAL_LISTS: ListId[] = ['test']
 
 /** 新聞稿分類。 */
 export const CATEGORIES = [

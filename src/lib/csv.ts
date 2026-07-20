@@ -33,6 +33,8 @@ Object.assign(LIST_ALIASES, {
   global: 'global_pr',
   uspr: 'us_pr',
   us: 'us_pr',
+  測試: 'test',
+  測試名單: 'test',
 } satisfies Record<string, ListId>)
 
 function normalizeList(raw: string): ListId | null {

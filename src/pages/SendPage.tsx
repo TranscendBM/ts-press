@@ -9,6 +9,7 @@ import PageHeader from '../components/PageHeader'
 import { Badge, Button, Modal, Select } from '../components/ui'
 import {
   CATEGORY_LABELS,
+  INTERNAL_LISTS,
   LANGUAGE_LABELS,
   LISTS,
   LIST_LABELS,
@@ -218,22 +219,36 @@ export default function SendPage() {
                 (c) => c.active !== false && (c.lists ?? []).includes(l),
               ).length
               const on = selected.includes(l)
+              const internal = INTERNAL_LISTS.includes(l)
               return (
                 <button
                   key={l}
                   onClick={() => toggle(l)}
                   className={`flex items-center justify-between rounded-lg border px-4 py-3 text-left transition ${
                     on
-                      ? 'border-brand-500 bg-brand-50'
+                      ? internal
+                        ? 'border-amber-500 bg-amber-50'
+                        : 'border-brand-500 bg-brand-50'
                       : 'border-slate-300 bg-white hover:bg-slate-50'
                   }`}
                 >
-                  <span
-                    className={`text-sm font-medium ${on ? 'text-brand-700' : 'text-slate-700'}`}
-                  >
-                    {LIST_LABELS[l]}
+                  <span className="flex items-center gap-2">
+                    <span
+                      className={`text-sm font-medium ${
+                        on
+                          ? internal
+                            ? 'text-amber-800'
+                            : 'text-brand-700'
+                          : 'text-slate-700'
+                      }`}
+                    >
+                      {LIST_LABELS[l]}
+                    </span>
+                    {internal && <Badge tone="amber">內部</Badge>}
                   </span>
-                  <Badge tone={on ? 'blue' : 'slate'}>{count} 位</Badge>
+                  <Badge tone={on ? (internal ? 'amber' : 'blue') : 'slate'}>
+                    {count} 位
+                  </Badge>
                 </button>
               )
             })}
