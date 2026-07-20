@@ -17,6 +17,7 @@ export interface MediaContact {
   email: string
   outlet: string
   title: string
+  phone: string
   note: string
   /** 可同時屬於多個名單。 */
   lists: ListId[]

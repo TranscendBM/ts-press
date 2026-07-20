@@ -40,6 +40,7 @@ const BLANK: Omit<MediaContact, 'id'> = {
   email: '',
   outlet: '',
   title: '',
+  phone: '',
   note: '',
   lists: [],
   language: 'tw',
@@ -82,7 +83,7 @@ export default function ContactsPage() {
     return contacts.filter((c) => {
       if (tab !== 'all' && !(c.lists ?? []).includes(tab)) return false
       if (!kw) return true
-      return [c.name, c.email, c.outlet, c.title]
+      return [c.name, c.email, c.outlet, c.title, c.phone]
         .filter(Boolean)
         .some((v) => v.toLowerCase().includes(kw))
     })
@@ -226,6 +227,7 @@ export default function ContactsPage() {
                   <Th>姓名</Th>
                   <Th>Email</Th>
                   <Th>媒體 / 職稱</Th>
+                  <Th>電話</Th>
                   <Th>所屬名單</Th>
                   <Th>語言</Th>
                   <Th className="w-24 text-right">操作</Th>
@@ -238,9 +240,13 @@ export default function ContactsPage() {
                     className={c.active === false ? 'opacity-45' : ''}
                   >
                     <Td>
-                      <span className="font-medium text-slate-900">
-                        {c.name}
-                      </span>
+                      {c.name ? (
+                        <span className="font-medium text-slate-900">
+                          {c.name}
+                        </span>
+                      ) : (
+                        <span className="text-slate-400">（未填姓名）</span>
+                      )}
                       {c.active === false && (
                         <span className="ml-2 text-xs text-slate-400">
                           （停用）
@@ -253,6 +259,9 @@ export default function ContactsPage() {
                       {c.title && (
                         <span className="text-slate-400"> · {c.title}</span>
                       )}
+                    </Td>
+                    <Td className="whitespace-nowrap text-slate-500">
+                      {c.phone || '—'}
                     </Td>
                     <Td>
                       <div className="flex flex-wrap gap-1">
@@ -382,6 +391,13 @@ function ContactModal({
               placeholder="記者"
             />
           </Field>
+          <Field label="電話">
+            <TextInput
+              value={draft.phone}
+              onChange={(e) => setDraft({ ...draft, phone: e.target.value })}
+              placeholder="0912-345-678"
+            />
+          </Field>
         </div>
 
         <Field label="所屬名單" hint="可複選；發送時依勾選的名單決定收件人。">
@@ -478,7 +494,6 @@ function ImportModal({
         } else {
           await addDoc(collection(db, 'mediaContacts'), {
             ...row,
-            active: true,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           })
@@ -523,11 +538,13 @@ function ImportModal({
       <div className="space-y-4">
         <div className="rounded-lg bg-slate-50 p-3 text-xs text-slate-600">
           <p className="mb-1 font-medium text-slate-700">格式（第一列為標題）</p>
-          <code className="block">姓名,Email,媒體,職稱,名單,語言,備註</code>
+          <code className="block">姓名,Email,媒體,職稱,電話,名單,語言,備註,啟用</code>
           <p className="mt-2">
-            「名單」欄可用頓號或分號分隔多個，例如
-            <code className="mx-1">台灣PR;GlobalPR</code>。 Email
-            重複時只會把名單聯集進既有資料，不會覆蓋。
+            欄位順序不拘，系統會依標題列自動對應，用不到的欄位可以省略。
+            「名單」欄可用分號分隔多個，例如
+            <code className="mx-1">台灣PR;測試名單</code>。
+            「啟用」欄留空視為啟用，填<code className="mx-1">否</code>則匯入後不會收信。
+            Email 重複時只會把名單聯集進既有資料，不會覆蓋。
           </p>
         </div>
 
