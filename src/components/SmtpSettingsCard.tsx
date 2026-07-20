@@ -11,6 +11,7 @@ const updateSmtpSettings = httpsCallable<
     host: string
     port: number
     user: string
+    fromEmail: string
     replyTo: string
     password?: string
   },
@@ -26,6 +27,7 @@ interface StoredSettings {
   host?: string
   port?: number
   user?: string
+  fromEmail?: string
   replyTo?: string
   updatedAt?: import('firebase/firestore').Timestamp
   updatedBy?: string
@@ -38,6 +40,7 @@ export default function SmtpSettingsCard() {
     host: '',
     port: '587',
     user: '',
+    fromEmail: '',
     replyTo: '',
   })
   const [password, setPassword] = useState('')
@@ -55,6 +58,7 @@ export default function SmtpSettingsCard() {
         host: d.host ?? '',
         port: String(d.port ?? 587),
         user: d.user ?? '',
+        fromEmail: d.fromEmail ?? '',
         replyTo: d.replyTo ?? '',
       })
     })
@@ -68,6 +72,7 @@ export default function SmtpSettingsCard() {
         host: form.host,
         port: Number(form.port) || 587,
         user: form.user,
+        fromEmail: form.fromEmail,
         replyTo: form.replyTo,
         // 留空代表不更動現有密碼
         ...(password ? { password } : {}),
@@ -105,6 +110,7 @@ export default function SmtpSettingsCard() {
     !!password ||
     form.host !== (stored?.host ?? '') ||
     form.user !== (stored?.user ?? '') ||
+    form.fromEmail !== (stored?.fromEmail ?? '') ||
     form.replyTo !== (stored?.replyTo ?? '') ||
     Number(form.port) !== (stored?.port ?? 587)
 
@@ -134,14 +140,24 @@ export default function SmtpSettingsCard() {
             placeholder="587"
           />
         </Field>
-        <Field label="寄件帳號" hint="也是信件的寄件地址，需為可登入的個人帳號。">
+        <Field label="認證帳號" hint="登入 SMTP 用，必須是可登入的個人帳號。">
           <TextInput
             value={form.user}
             onChange={(e) => setForm({ ...form, user: e.target.value })}
             placeholder="elvis_cheng@transcend-info.com"
           />
         </Field>
-        <Field label="回覆至" hint="記者按回信時會進的信箱，留空則同寄件帳號。">
+        <Field
+          label="寄件地址"
+          hint="記者看到的寄件人。可填群組信箱，前提是認證帳號有代理寄件權限。"
+        >
+          <TextInput
+            value={form.fromEmail}
+            onChange={(e) => setForm({ ...form, fromEmail: e.target.value })}
+            placeholder="press_center@transcend-info.com"
+          />
+        </Field>
+        <Field label="回覆至" hint="記者按回信時會進的信箱，留空則同寄件地址。">
           <TextInput
             value={form.replyTo}
             onChange={(e) => setForm({ ...form, replyTo: e.target.value })}

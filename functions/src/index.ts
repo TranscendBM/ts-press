@@ -32,7 +32,13 @@ const secretClient = new SecretManagerServiceClient()
 interface SmtpSettings {
   host: string
   port: number
+  /** SMTP 認證用的帳號，必須是可登入的個人帳號。 */
   user: string
+  /**
+   * 信件 From 標頭要顯示的地址。可以與認證帳號不同（Mail2000 的「代理寄件」），
+   * 前提是 IT 已授權該認證帳號使用這個地址，否則伺服器會拒收。
+   */
+  fromEmail: string
   replyTo: string
 }
 
@@ -49,7 +55,8 @@ async function readSmtpSettings(): Promise<SmtpSettings> {
     host: d.host,
     port: Number(d.port) || 587,
     user: d.user,
-    replyTo: d.replyTo || d.user,
+    fromEmail: d.fromEmail || d.user,
+    replyTo: d.replyTo || d.fromEmail || d.user,
   }
 }
 
@@ -293,8 +300,7 @@ export const sendCampaign = onCall<SendRequest>(
       try {
         await transporter.sendMail({
           to: r.name ? `"${r.name.replace(/"/g, '')}" <${r.email}>` : r.email,
-          // 寄件地址必須與認證帳號一致，否則 mail2000 會拒收
-          from: `"${SENDER_NAME_BY_LANG[r.language]}" <${settings.user}>`,
+          from: `"${SENDER_NAME_BY_LANG[r.language]}" <${settings.fromEmail}>`,
           replyTo: settings.replyTo,
           subject: `${isTest ? '[測試] ' : ''}${version.subject}`,
           text: renderEmailText(templateInput),
@@ -369,6 +375,7 @@ interface SmtpSettingsRequest {
   host: string
   port: number
   user: string
+  fromEmail: string
   replyTo: string
   /** 留空代表不更動現有密碼。 */
   password?: string
@@ -378,7 +385,8 @@ interface SmtpSettingsRequest {
 export const updateSmtpSettings = onCall<SmtpSettingsRequest>(
   async (request) => {
     const admin = await requireAdmin(request.auth?.token?.email)
-    const { host, port, user, replyTo, password } = request.data ?? {}
+    const { host, port, user, fromEmail, replyTo, password } =
+      request.data ?? {}
 
     if (!host?.trim() || !user?.trim()) {
       throw new HttpsError('invalid-argument', '主機與帳號為必填。')
@@ -408,6 +416,7 @@ export const updateSmtpSettings = onCall<SmtpSettingsRequest>(
         host: host.trim(),
         port: portNum,
         user: user.trim(),
+        fromEmail: (fromEmail || '').trim() || user.trim(),
         replyTo: (replyTo || '').trim() || user.trim(),
         updatedAt: FieldValue.serverTimestamp(),
         updatedBy: admin.email,
@@ -440,20 +449,33 @@ export const testSmtpConnection = onCall<{ sendTestEmail?: boolean }>(
       try {
         await transporter.sendMail({
           to: admin.email,
-          from: `"創見資訊 新聞中心" <${settings.user}>`,
+          from: `"創見資訊 新聞中心" <${settings.fromEmail}>`,
           replyTo: settings.replyTo,
           subject: '[測試] 新聞稿發送系統連線測試',
-          text: `連線成功。\n\n主機：${settings.host}:${settings.port}\n帳號：${settings.user}\n回覆至：${settings.replyTo}`,
+          text: [
+            '連線成功，這封信就是系統實際寄出的樣子。',
+            '',
+            `主機：${settings.host}:${settings.port}`,
+            `認證帳號：${settings.user}`,
+            `寄件地址：${settings.fromEmail}`,
+            `回覆至：${settings.replyTo}`,
+            '',
+            '請確認這封信的「寄件者」顯示是否正確，',
+            '以及按下回覆時收件地址是否為預期的信箱。',
+          ].join('\n'),
         })
       } catch (err) {
         return {
           ok: false,
-          message: `連線成功但寄信失敗：${(err as Error).message}`,
+          message: `連線成功但寄信失敗：${describeSmtpError((err as Error).message)}`,
         }
       } finally {
         transporter.close()
       }
-      return { ok: true, message: `連線成功，已寄一封測試信到 ${admin.email}。` }
+      return {
+        ok: true,
+        message: `已寄一封測試信到 ${admin.email}，請確認寄件者顯示為 ${settings.fromEmail}。`,
+      }
     }
 
     transporter.close()
@@ -475,6 +497,9 @@ function describeSmtpError(message: string): string {
   }
   if (m.includes('certificate') || m.includes('self signed')) {
     return `TLS 憑證驗證失敗（${message}）`
+  }
+  if (m.includes('550') || m.includes('sender') || m.includes('not allowed')) {
+    return `伺服器拒絕這個寄件地址 —— 認證帳號可能沒有被授權以該地址寄信，請確認 IT 是否已開放代理寄件權限。（${message}）`
   }
   return message
 }
