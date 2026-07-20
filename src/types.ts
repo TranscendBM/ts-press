@@ -4,6 +4,7 @@ import type {
   EventType,
   Language,
   ListId,
+  MediaType,
   Role,
 } from './constants'
 
@@ -25,6 +26,10 @@ export interface MediaContact {
   title: string
   phone: string
   note: string
+  /** 媒體屬性分類，用於分組顯示。 */
+  mediaType?: MediaType
+  /** 重要性排序，數字越小越前面。未設定為 null，排在最後。 */
+  rank?: number | null
   /** 可同時屬於多個名單。 */
   lists: ListId[]
   /** 這位聯絡人要收到哪個語言版本。 */

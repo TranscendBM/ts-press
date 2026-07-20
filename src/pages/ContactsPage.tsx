@@ -10,6 +10,7 @@ import {
 } from 'firebase/firestore'
 import {
   ChevronDown,
+  ListOrdered,
   ChevronUp,
   ChevronsUpDown,
   Download,
@@ -37,13 +38,17 @@ import {
   LISTS,
   LIST_DEFAULT_LANGUAGE,
   LIST_LABELS,
+  MEDIA_TYPES,
+  MEDIA_TYPE_LABELS,
+  lookupMediaTier,
   type Language,
   type ListId,
+  type MediaType,
 } from '../constants'
 import type { MediaContact } from '../types'
 import { contactsToCsv, parseContactsCsv } from '../lib/csv'
 
-type SortKey = 'outlet' | 'name' | 'title' | 'email' | 'language'
+type SortKey = 'rank' | 'outlet' | 'name' | 'title' | 'email' | 'language'
 
 const BLANK: Omit<MediaContact, 'id'> = {
   name: '',
@@ -52,6 +57,8 @@ const BLANK: Omit<MediaContact, 'id'> = {
   title: '',
   phone: '',
   note: '',
+  mediaType: 'other',
+  rank: null,
   lists: [],
   language: 'tw',
   active: true,
@@ -63,9 +70,10 @@ export default function ContactsPage() {
   const [tab, setTab] = useState<ListId | 'all'>('all')
   const [search, setSearch] = useState('')
   const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({
-    key: 'outlet',
+    key: 'rank',
     asc: true,
   })
+  const [applying, setApplying] = useState(false)
   const [editing, setEditing] = useState<MediaContact | null>(null)
   const [draft, setDraft] = useState(BLANK)
   const [saving, setSaving] = useState(false)
@@ -104,12 +112,49 @@ export default function ContactsPage() {
 
     const dir = sort.asc ? 1 : -1
     return rows.sort((a, b) => {
+      if (sort.key === 'rank') {
+        // 未設定重要性的一律排最後，不論升冪或降冪
+        const ar = a.rank ?? Number.MAX_SAFE_INTEGER
+        const br = b.rank ?? Number.MAX_SAFE_INTEGER
+        if (ar !== br) return (ar - br) * dir
+        return (a.outlet ?? '').localeCompare(b.outlet ?? '', 'zh-Hant')
+      }
       const av = (a[sort.key] ?? '') as string
       const bv = (b[sort.key] ?? '') as string
       // 中文用 localeCompare 才會照筆劃/拼音排，不然會變成 Unicode 碼順序
       return av.localeCompare(bv, 'zh-Hant') * dir
     })
   }, [contacts, tab, search, sort])
+
+  /** 依建議分類表比對媒體名稱，套用分類與重要性。已設定的會被覆蓋。 */
+  async function applySuggestedTiers() {
+    const targets = contacts.filter((c) => lookupMediaTier(c.outlet))
+    const unmatched = contacts.filter(
+      (c) => c.outlet && !lookupMediaTier(c.outlet),
+    )
+    const msg =
+      `將依建議分類表更新 ${targets.length} 位聯絡人的媒體類型與重要性。` +
+      (unmatched.length > 0
+        ? `\n\n有 ${unmatched.length} 位的媒體不在分類表中，會維持原狀：\n` +
+          Array.from(new Set(unmatched.map((c) => c.outlet))).join('、')
+        : '')
+    if (!confirm(msg)) return
+
+    setApplying(true)
+    try {
+      for (const c of targets) {
+        const tier = lookupMediaTier(c.outlet)!
+        await updateDoc(doc(db, 'mediaContacts', c.id), {
+          mediaType: tier.type,
+          rank: tier.rank,
+          updatedAt: serverTimestamp(),
+        })
+      }
+      setSort({ key: 'rank', asc: true })
+    } finally {
+      setApplying(false)
+    }
+  }
 
   function openNew() {
     setEditing(null)
@@ -138,6 +183,8 @@ export default function ContactsPage() {
         ...draft,
         name: draft.name.trim(),
         email: draft.email.trim().toLowerCase(),
+        // Firestore 不接受 undefined，沒填的重要性一律存成 null
+        rank: draft.rank ?? null,
         updatedAt: serverTimestamp(),
       }
       if (editing) {
@@ -184,6 +231,10 @@ export default function ContactsPage() {
         description={`共 ${contacts.length} 位聯絡人`}
         actions={
           <>
+            <Button onClick={applySuggestedTiers} disabled={applying}>
+              <ListOrdered className="size-4" />
+              {applying ? '套用中…' : '套用建議分類'}
+            </Button>
             <Button onClick={() => setImportOpen(true)}>
               <Upload className="size-4" />
               匯入 CSV
@@ -246,9 +297,13 @@ export default function ContactsPage() {
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-left text-xs text-slate-500">
                 <tr>
+                  <SortTh sortKey="rank" sort={sort} setSort={setSort}>
+                    重要性
+                  </SortTh>
                   <SortTh sortKey="outlet" sort={sort} setSort={setSort}>
                     媒體
                   </SortTh>
+                  <Th>類型</Th>
                   <SortTh sortKey="name" sort={sort} setSort={setSort}>
                     姓名
                   </SortTh>
@@ -272,6 +327,9 @@ export default function ContactsPage() {
                     key={c.id}
                     className={c.active === false ? 'opacity-45' : ''}
                   >
+                    <Td className="text-center text-slate-400">
+                      {c.rank ?? '—'}
+                    </Td>
                     <Td>
                       <span className="font-medium text-slate-900">
                         {c.outlet || '—'}
@@ -280,6 +338,13 @@ export default function ContactsPage() {
                         <span className="ml-2 text-xs text-slate-400">
                           （停用）
                         </span>
+                      )}
+                    </Td>
+                    <Td>
+                      {c.mediaType && c.mediaType !== 'other' ? (
+                        <Badge>{MEDIA_TYPE_LABELS[c.mediaType]}</Badge>
+                      ) : (
+                        <span className="text-slate-300">—</span>
                       )}
                     </Td>
                     <Td className="text-slate-700">
@@ -425,6 +490,36 @@ function ContactModal({
               value={draft.phone}
               onChange={(e) => setDraft({ ...draft, phone: e.target.value })}
               placeholder="0912-345-678"
+            />
+          </Field>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <Field label="媒體類型">
+            <Select
+              value={draft.mediaType ?? 'other'}
+              onChange={(e) =>
+                setDraft({ ...draft, mediaType: e.target.value as MediaType })
+              }
+            >
+              {MEDIA_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {MEDIA_TYPE_LABELS[t]}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="重要性排序" hint="數字越小越前面，留空則排在最後。">
+            <TextInput
+              type="number"
+              value={draft.rank ?? ''}
+              onChange={(e) =>
+                setDraft({
+                  ...draft,
+                  rank: e.target.value === '' ? undefined : Number(e.target.value),
+                })
+              }
+              placeholder="例如 1"
             />
           </Field>
         </div>

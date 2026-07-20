@@ -50,6 +50,103 @@ export const CATEGORY_LABELS: Record<Category, string> = {
   exhibition: '秀展',
 }
 
+/** 媒體屬性分類，用於台灣媒體名單的分組與重要性排序。 */
+export const MEDIA_TYPES = [
+  'paper',
+  'tv',
+  'magazine',
+  'finance',
+  'tech',
+  'online',
+  'other',
+] as const
+export type MediaType = (typeof MEDIA_TYPES)[number]
+
+export const MEDIA_TYPE_LABELS: Record<MediaType, string> = {
+  paper: '傳統紙媒',
+  tv: '電視媒體',
+  magazine: '雜誌',
+  finance: '財經媒體',
+  tech: '科技媒體',
+  online: '網路媒體',
+  other: '未分類',
+}
+
+/** 各分類的顯示順序，數字小的排前面。 */
+export const MEDIA_TYPE_ORDER: Record<MediaType, number> = {
+  paper: 1,
+  tv: 2,
+  magazine: 3,
+  finance: 4,
+  tech: 5,
+  online: 6,
+  other: 9,
+}
+
+/**
+ * 台灣媒體的建議分類與重要性順序（由行銷部提供）。
+ * rank 是跨分類的全域排序，數字越小越重要。
+ * 後台的「套用建議分類」會依媒體名稱比對後套用，之後仍可個別調整。
+ */
+export const MEDIA_TIER_MAP: Record<string, { type: MediaType; rank: number }> =
+  {
+    // 1. 傳統紙媒（報紙、通訊社）
+    中央社: { type: 'paper', rank: 1 },
+    經濟日報: { type: 'paper', rank: 2 },
+    聯合報: { type: 'paper', rank: 3 },
+    自由時報: { type: 'paper', rank: 4 },
+    中國時報: { type: 'paper', rank: 5 },
+    '英文台北時報(TaipeiTimes)': { type: 'paper', rank: 6 },
+
+    // 2. 電視媒體
+    TVBS: { type: 'tv', rank: 11 },
+    非凡財經: { type: 'tv', rank: 12 },
+    東森財經: { type: 'tv', rank: 13 },
+    東森財經新聞台: { type: 'tv', rank: 14 },
+
+    // 3. 雜誌
+    天下雜誌: { type: 'magazine', rank: 21 },
+    遠見: { type: 'magazine', rank: 22 },
+    鏡週刊: { type: 'magazine', rank: 23 },
+    財訊: { type: 'magazine', rank: 24 },
+    財訊雙周刊: { type: 'magazine', rank: 25 },
+    理財周刊: { type: 'magazine', rank: 26 },
+
+    // 4. 財經媒體
+    鉅亨網: { type: 'finance', rank: 31 },
+    '精實財經MoneyDJ': { type: 'finance', rank: 32 },
+    優分析: { type: 'finance', rank: 33 },
+    時報資訊: { type: 'finance', rank: 34 },
+
+    // 5. 科技媒體
+    '電子時報DigitalTimes': { type: 'tech', rank: 41 },
+    '集邦科技(Trendforce)': { type: 'tech', rank: 42 },
+    科技新報: { type: 'tech', rank: 43 },
+    EETimes: { type: 'tech', rank: 44 },
+    PCDIY: { type: 'tech', rank: 45 },
+    'ioioTIMES科技世代': { type: 'tech', rank: 46 },
+
+    // 6. 網路媒體
+    ETtoday: { type: 'online', rank: 51 },
+    風傳媒: { type: 'online', rank: 52 },
+    壹蘋新聞網: { type: 'online', rank: 53 },
+    NOWnews: { type: 'online', rank: 54 },
+    FTNN鋒燦傳媒: { type: 'online', rank: 55 },
+    知新聞: { type: 'online', rank: 56 },
+    鏡報新聞網: { type: 'online', rank: 57 },
+  }
+
+/** 比對媒體名稱時忽略空白與大小寫，避免「PCDIY」與「PCDIY!」對不上。 */
+export function lookupMediaTier(outlet: string) {
+  const key = (outlet ?? '').replace(/[\s!！]/g, '')
+  if (MEDIA_TIER_MAP[key]) return MEDIA_TIER_MAP[key]
+  const lower = key.toLowerCase()
+  const hit = Object.keys(MEDIA_TIER_MAP).find(
+    (k) => k.toLowerCase() === lower,
+  )
+  return hit ? MEDIA_TIER_MAP[hit] : null
+}
+
 /** 媒體關係經營的活動類型。 */
 export const EVENT_TYPES = [
   'meal',

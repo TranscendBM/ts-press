@@ -16,6 +16,7 @@
     "deploy:rules": "firebase deploy --only firestore:rules,storage,firestore:indexes"
   },
   "dependencies": {
+    "docx": "^9.7.1",
     "firebase": "^12.16.0",
     "lucide-react": "^1.25.0",
     "react": "^19.2.7",

@@ -13,6 +13,13 @@
 
 export const BRAND_COLOR = '#960014'
 
+/**
+ * 信件頁首的白色 logo，配紅底使用。
+ * 必須是絕對網址而且是 PNG —— 信件裡不能用相對路徑，
+ * 而 Outlook 桌面版完全不支援 SVG。
+ */
+export const DEFAULT_EMAIL_LOGO = 'https://ts-press.web.app/logo-white.png'
+
 export interface PressContact {
   name: string
   company: string
@@ -157,6 +164,7 @@ export function renderEmailHtml(input: TemplateInput): string {
   // 後台沒填就用內建預設，確保信件永遠有公司簡介
   const aboutText = input.about?.trim() || copy.about
   const aboutLink = input.aboutLink?.trim() || copy.aboutLink
+  const logoUrl = input.logoUrl?.trim() || DEFAULT_EMAIL_LOGO
 
   // 圖片置中插在開頭段落之後：讀者先讀完導言、正要往下時看到產品圖。
   // 不用兩欄並排 —— 260px 圖擠在 600px 版面裡會讓文字欄只剩 320px，
@@ -210,12 +218,8 @@ export function renderEmailHtml(input: TemplateInput): string {
 
       <!-- 頁首 -->
       <tr><td style="background-color:${BRAND_COLOR};padding:18px 32px;">
-        ${
-          input.logoUrl
-            ? `<img src="${input.logoUrl}" alt="TRANSCEND" height="26"
-                    style="display:block;height:26px;width:auto;border:0;">`
-            : `<span style="color:#ffffff;font-size:17px;font-weight:600;letter-spacing:1.5px;font-family:${FONT_EN};">TRANSCEND</span>`
-        }
+        <img src="${escapeHtml(logoUrl)}" alt="TRANSCEND" height="26"
+             style="display:block;height:26px;width:auto;border:0;">
       </td></tr>
 
       <!-- 標題與發佈日期 -->

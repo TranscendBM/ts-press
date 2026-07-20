@@ -3,9 +3,10 @@ import { doc, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore'
 import { Contact, ImageIcon, Upload } from 'lucide-react'
 import { db } from '../lib/firebase'
 import { uploadBrandingFile } from '../lib/storage'
+import { DEFAULT_UI_LOGO } from '../lib/useBranding'
 import { Button, Field, TextArea, TextInput } from './ui'
 import { LANGUAGES, LANGUAGE_LABELS, type Language } from '../constants'
-import { DEFAULT_ABOUT } from '../lib/emailTemplate'
+import { DEFAULT_ABOUT, DEFAULT_EMAIL_LOGO } from '../lib/emailTemplate'
 import type { AboutBlock, EmailSettings, PressContact } from '../types'
 
 const BLANK: PressContact = { name: '', company: '', email: '', phone: '' }
@@ -141,7 +142,7 @@ export default function PressContactsCard() {
       <div className="mb-6 max-w-2xl">
         <Field
           label="頁首 Logo"
-          hint="建議白色、透明背景的 PNG，高度 64px 以上（顯示時縮到 32px，2 倍尺寸才不會糊）。留空則顯示文字版 TRANSCEND。"
+          hint="留空即使用系統內建的白色版 logo。要換成別的請上傳白色、透明背景的 PNG（高度 64px 以上，顯示時會縮到 26px）。"
         >
           <div className="flex gap-2">
             <TextInput
@@ -179,20 +180,11 @@ export default function PressContactsCard() {
           className="mt-3 flex h-16 items-center rounded-lg px-6"
           style={{ backgroundColor: '#960014' }}
         >
-          {logoUrl.trim() ? (
-            <img
-              src={logoUrl}
-              alt="logo 預覽"
-              className="h-8 w-auto"
-              onError={(e) => {
-                e.currentTarget.style.display = 'none'
-              }}
-            />
-          ) : (
-            <span className="text-lg font-bold tracking-wide text-white">
-              TRANSCEND
-            </span>
-          )}
+          <img
+            src={logoUrl.trim() || DEFAULT_EMAIL_LOGO}
+            alt="logo 預覽"
+            className="h-8 w-auto"
+          />
         </div>
         <p className="mt-2 flex items-center gap-1.5 text-xs text-slate-400">
           <ImageIcon className="size-3.5" />
@@ -202,7 +194,7 @@ export default function PressContactsCard() {
         <div className="mt-6">
           <Field
             label="系統介面 Logo"
-            hint="顯示在登入頁與左側選單。這裡是白底，要用深色版本的 logo。"
+            hint="顯示在登入頁與左側選單。留空即使用系統內建的深色版 logo。"
           >
             <div className="flex gap-2">
               <TextInput
@@ -237,20 +229,11 @@ export default function PressContactsCard() {
             />
           </Field>
           <div className="mt-3 flex h-16 items-center rounded-lg border border-slate-200 bg-white px-6">
-            {uiLogoUrl.trim() ? (
-              <img
-                src={uiLogoUrl}
-                alt="介面 logo 預覽"
-                className="h-7 w-auto"
-                onError={(e) => {
-                  e.currentTarget.style.display = 'none'
-                }}
-              />
-            ) : (
-              <span className="text-sm text-slate-400">
-                未設定，介面會顯示預設圖示
-              </span>
-            )}
+            <img
+              src={uiLogoUrl.trim() || DEFAULT_UI_LOGO}
+              alt="介面 logo 預覽"
+              className="h-7 w-auto"
+            />
           </div>
         </div>
       </div>

@@ -41,6 +41,7 @@ export default function PressEditPage() {
   const [dirty, setDirty] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [downloading, setDownloading] = useState(false)
   const [error, setError] = useState('')
 
   const heroInput = useRef<HTMLInputElement>(null)
@@ -215,9 +216,19 @@ export default function PressEditPage() {
               <Eye className="size-4" />
               預覽
             </Button>
-            <Button onClick={() => downloadWord(templateInput, downloadName)}>
+            <Button
+              onClick={async () => {
+                setDownloading(true)
+                try {
+                  await downloadWord(templateInput, downloadName)
+                } finally {
+                  setDownloading(false)
+                }
+              }}
+              disabled={downloading}
+            >
               <FileType className="size-4" />
-              Word
+              {downloading ? '產生中…' : 'Word'}
             </Button>
             <Button onClick={() => downloadPdf(templateInput, downloadName)}>
               <FileDown className="size-4" />
