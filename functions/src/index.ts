@@ -4,6 +4,7 @@ import { FieldValue, getFirestore } from 'firebase-admin/firestore'
 import { getStorage } from 'firebase-admin/storage'
 import { onCall, HttpsError } from 'firebase-functions/v2/https'
 import { onDocumentWritten } from 'firebase-functions/v2/firestore'
+import { defineSecret } from 'firebase-functions/params'
 import { setGlobalOptions } from 'firebase-functions/v2'
 import * as functionsV1 from 'firebase-functions/v1'
 import * as logger from 'firebase-functions/logger'
@@ -26,6 +27,14 @@ const db = getFirestore()
 const SMTP_SECRET_ID = 'SMTP_PASS'
 const PROJECT_ID =
   process.env.GCLOUD_PROJECT ?? process.env.GOOGLE_CLOUD_PROJECT ?? ''
+
+/**
+ * 這個宣告的用途不是取值，而是讓 Firebase 在部署時自動把
+ * secretAccessor 權限授予 Functions 的執行服務帳號。
+ * 實際讀取仍走底下的 client 並取 latest 版本，這樣後台改密碼才會立即生效
+ * （宣告注入的環境變數是部署當下的版本，會過期）。
+ */
+const SMTP_PASS = defineSecret(SMTP_SECRET_ID)
 
 const secretClient = new SecretManagerServiceClient()
 
@@ -70,9 +79,18 @@ async function readSmtpPassword(): Promise<string> {
     return pass
   } catch (err) {
     logger.error('讀取 SMTP 密碼失敗', err)
+    const e = err as { code?: number; message?: string }
+    // 7 = PERMISSION_DENIED、5 = NOT_FOUND。兩者原因完全不同，不能混為一談。
+    if (e.code === 7) {
+      throw new HttpsError(
+        'internal',
+        'Cloud Functions 沒有讀取密鑰的權限。請到 Google Cloud Console → IAM，' +
+          '為 Functions 的執行服務帳號加上「Secret Manager 密鑰存取者」角色。',
+      )
+    }
     throw new HttpsError(
       'failed-precondition',
-      '尚未設定寄信密碼，請先到「系統設定 → 寄信設定」填寫。',
+      '尚未設定寄信密碼，請到「系統設定 → 寄信設定」填寫。',
     )
   }
 }
@@ -169,7 +187,7 @@ async function loadAttachments(
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 export const sendCampaign = onCall<SendRequest>(
-  { timeoutSeconds: 540, memory: '512MiB' },
+  { secrets: [SMTP_PASS], timeoutSeconds: 540, memory: '512MiB' },
   async (request) => {
     const { pressReleaseId, targetLists, isTest } = request.data ?? {}
     if (!pressReleaseId) {
@@ -431,7 +449,7 @@ export const updateSmtpSettings = onCall<SmtpSettingsRequest>(
 
 /** 測試 SMTP 連線與帳密，成功時可順便寄一封信給操作者。 */
 export const testSmtpConnection = onCall<{ sendTestEmail?: boolean }>(
-  { timeoutSeconds: 120 },
+  { secrets: [SMTP_PASS], timeoutSeconds: 120 },
   async (request) => {
     const admin = await requireAdmin(request.auth?.token?.email)
     const settings = await readSmtpSettings()
