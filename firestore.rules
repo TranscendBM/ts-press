@@ -1,0 +1,50 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 目前登入者的白名單文件（文件 id 就是 email）
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.token.email)).data;
+    }
+
+    function isWhitelisted() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email.matches('.*@transcend-info[.]com$')
+        && exists(/databases/$(database)/documents/users/$(request.auth.token.email))
+        && userDoc().active == true;
+    }
+
+    function isAdmin() {
+      return isWhitelisted() && userDoc().role == 'admin';
+    }
+
+    // 白名單本身只有 admin 能改；每個人可以讀（前端要顯示角色）
+    match /users/{email} {
+      allow read: if isWhitelisted();
+      allow write: if isAdmin();
+    }
+
+    // 媒體名單：白名單使用者皆可維護
+    match /mediaContacts/{id} {
+      allow read, write: if isWhitelisted();
+    }
+
+    // 新聞稿：白名單使用者皆可編輯
+    match /pressReleases/{id} {
+      allow read, write: if isWhitelisted();
+    }
+
+    // 發送紀錄：只能讀，寫入一律由 Cloud Functions（Admin SDK）處理
+    match /campaigns/{id} {
+      allow read: if isWhitelisted();
+      allow write: if false;
+
+      match /recipients/{recipientId} {
+        allow read: if isWhitelisted();
+        allow write: if false;
+      }
+    }
+  }
+}

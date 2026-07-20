@@ -1,0 +1,20 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isCompanyUser() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email.matches('.*@transcend-info[.]com$');
+    }
+
+    // 新聞稿的內嵌圖與附件
+    match /press/{pressId}/{allPaths=**} {
+      allow read: if isCompanyUser();
+      // 單檔 10MB 上限，且僅允許圖片與常見文件格式
+      allow write: if isCompanyUser()
+        && request.resource.size < 10 * 1024 * 1024;
+    }
+  }
+}
