@@ -69,11 +69,24 @@ export default function SettingsPage() {
     }
   }
 
+  // 把自己降級或停用會當場鎖死自己，且只能到 Firestore Console 手動救回來
+  function isSelf(u: AppUser) {
+    return u.email === appUser?.email
+  }
+
   async function changeRole(u: AppUser, role: Role) {
+    if (isSelf(u) && role !== 'admin') {
+      alert('不能把自己降級，否則會失去管理權限而無法復原。請改由其他管理員操作。')
+      return
+    }
     await setDoc(doc(db, 'users', u.email), { role }, { merge: true })
   }
 
   async function toggleActive(u: AppUser) {
+    if (isSelf(u) && u.active) {
+      alert('不能停用自己的帳號，停用後會立刻登出且無法自行復原。')
+      return
+    }
     await setDoc(doc(db, 'users', u.email), { active: !u.active }, { merge: true })
   }
 
@@ -122,13 +135,20 @@ export default function SettingsPage() {
                 <tr key={u.email} className={u.active ? '' : 'opacity-50'}>
                   <td className="px-4 py-3 font-medium text-slate-900">
                     {u.displayName}
+                    {isSelf(u) && (
+                      <span className="ml-2 text-xs font-normal text-slate-400">
+                        （你自己）
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-slate-600">{u.email}</td>
                   <td className="px-4 py-3">
                     <Select
                       value={u.role}
                       onChange={(e) => changeRole(u, e.target.value as Role)}
-                      className="w-32"
+                      disabled={isSelf(u)}
+                      title={isSelf(u) ? '不能變更自己的角色' : undefined}
+                      className="w-32 disabled:bg-slate-50 disabled:text-slate-400"
                     >
                       {ROLES.map((r) => (
                         <option key={r} value={r}>
@@ -147,7 +167,11 @@ export default function SettingsPage() {
                   <td className="px-4 py-3">
                     <button
                       onClick={() => toggleActive(u)}
-                      className="text-xs text-slate-500 underline-offset-2 hover:underline"
+                      disabled={isSelf(u) && u.active}
+                      title={
+                        isSelf(u) && u.active ? '不能停用自己的帳號' : undefined
+                      }
+                      className="text-xs text-slate-500 underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:no-underline disabled:opacity-50"
                     >
                       {u.active ? '啟用中' : '已停用'}
                     </button>
