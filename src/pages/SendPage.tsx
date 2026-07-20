@@ -100,6 +100,9 @@ export default function SendPage() {
   }, [press, byLanguage])
 
   const attachTotal = press?.attachments?.reduce((s, a) => s + a.size, 0) ?? 0
+  const testListCount = contacts.filter(
+    (c) => c.active !== false && (c.lists ?? []).includes('test'),
+  ).length
   const readyToSend =
     !!press && recipients.length > 0 && missingVersions.length === 0
 
@@ -212,7 +215,40 @@ export default function SendPage() {
           )}
         </Card>
 
-        <Card step="2" title="勾選要發送的名單">
+        <Card step="2" title="寄送測試信">
+          <p className="mb-4 text-sm text-slate-500">
+            正式發送前務必先試寄，確認排版、圖片與附件都正確。測試信只會寄給你自己，
+            不會碰到任何媒體名單。
+          </p>
+          <Button
+            onClick={() => run(true)}
+            disabled={busy || !press || missingVersions.length > 0}
+          >
+            <TestTube2 className="size-4" />
+            寄測試信給我（{appUser?.email}）
+          </Button>
+          <p className="mt-3 text-xs text-slate-400">
+            已填寫的每個語言版本都會各寄一封，方便一次核對三個版本。
+          </p>
+
+          <div className="mt-5 rounded-lg border border-amber-200 bg-amber-50 p-4">
+            <p className="mb-3 text-sm font-medium text-amber-900">
+              想做完整的發送演練？
+            </p>
+            <p className="mb-3 text-xs text-amber-800">
+              勾選「測試名單」後用下方的正式發送，流程與真實發稿完全相同，
+              但只會寄給名單裡的內部同仁。
+            </p>
+            <button
+              onClick={() => setSelected(['test'])}
+              className="rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-900 transition hover:bg-amber-100"
+            >
+              只勾選測試名單（{testListCount} 位）
+            </button>
+          </div>
+        </Card>
+
+        <Card step="3" title="正式發送">
           <div className="grid grid-cols-2 gap-3">
             {LISTS.map((l) => {
               const count = contacts.filter(
@@ -279,20 +315,8 @@ export default function SendPage() {
               </span>
             </div>
           )}
-        </Card>
 
-        <Card step="3" title="測試與發送">
-          <p className="mb-4 text-sm text-slate-500">
-            正式發送前請務必先寄一封測試信給自己，確認排版、圖片與附件都正確。
-          </p>
-          <div className="flex flex-wrap gap-3">
-            <Button
-              onClick={() => run(true)}
-              disabled={busy || !press || missingVersions.length > 0}
-            >
-              <TestTube2 className="size-4" />
-              寄測試信給我
-            </Button>
+          <div className="mt-5 border-t border-slate-200 pt-5">
             <Button
               variant="primary"
               onClick={() => setConfirmOpen(true)}
@@ -300,13 +324,14 @@ export default function SendPage() {
             >
               <Send className="size-4" />
               正式發送
+              {recipients.length > 0 && `（${recipients.length} 位）`}
             </Button>
+            {!canSend && (
+              <p className="mt-3 text-xs text-amber-700">
+                你的角色沒有正式發送權限，僅能寄送測試信。
+              </p>
+            )}
           </div>
-          {!canSend && (
-            <p className="mt-3 text-xs text-amber-700">
-              你的角色沒有正式發送權限，僅能寄送測試信。
-            </p>
-          )}
         </Card>
       </div>
 

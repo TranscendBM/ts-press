@@ -50,6 +50,33 @@ export const CATEGORY_LABELS: Record<Category, string> = {
   exhibition: '秀展',
 }
 
+/** 媒體關係經營的活動類型。 */
+export const EVENT_TYPES = [
+  'meal',
+  'tea',
+  'gift_dragonboat',
+  'gift_midautumn',
+  'gift_other',
+  'other',
+] as const
+export type EventType = (typeof EVENT_TYPES)[number]
+
+export const EVENT_TYPE_LABELS: Record<EventType, string> = {
+  meal: '媒體餐敘',
+  tea: '媒體茶會',
+  gift_dragonboat: '端午禮品',
+  gift_midautumn: '中秋禮品',
+  gift_other: '其他禮品',
+  other: '其他活動',
+}
+
+/** 送禮類活動用「贈送」而非「出席」，介面文案要跟著換。 */
+export const GIFT_TYPES: EventType[] = [
+  'gift_dragonboat',
+  'gift_midautumn',
+  'gift_other',
+]
+
 /** 使用者角色。admin 與 manager 可按下正式發送。 */
 export const ROLES = ['admin', 'manager', 'editor'] as const
 export type Role = (typeof ROLES)[number]

@@ -3,6 +3,8 @@ import { AuthProvider, useAuth } from './lib/AuthContext'
 import Layout from './components/Layout'
 import LoginPage from './pages/LoginPage'
 import ContactsPage from './pages/ContactsPage'
+import EventsPage from './pages/EventsPage'
+import EventDetailPage from './pages/EventDetailPage'
 import PressListPage from './pages/PressListPage'
 import PressEditPage from './pages/PressEditPage'
 import SendPage from './pages/SendPage'
@@ -30,6 +32,8 @@ function Shell() {
         <Route path="/press" element={<PressListPage />} />
         <Route path="/press/:id" element={<PressEditPage />} />
         <Route path="/contacts" element={<ContactsPage />} />
+        <Route path="/events" element={<EventsPage />} />
+        <Route path="/events/:id" element={<EventDetailPage />} />
         <Route path="/send" element={<SendPage />} />
         <Route path="/campaigns" element={<CampaignsPage />} />
         <Route path="/campaigns/:id" element={<CampaignDetailPage />} />

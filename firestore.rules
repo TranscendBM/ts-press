@@ -44,6 +44,15 @@ service cloud.firestore {
       allow read, write: if isWhitelisted();
     }
 
+    // 媒體關係經營：活動與每位媒體的參加／贈送紀錄
+    match /mediaEvents/{id} {
+      allow read, write: if isWhitelisted();
+
+      match /participants/{contactId} {
+        allow read, write: if isWhitelisted();
+      }
+    }
+
     // 新聞稿：白名單使用者皆可編輯
     match /pressReleases/{id} {
       allow read, write: if isWhitelisted();

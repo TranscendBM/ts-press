@@ -5,12 +5,20 @@ import {
   deleteDoc,
   doc,
   onSnapshot,
-  orderBy,
-  query,
   serverTimestamp,
   updateDoc,
 } from 'firebase/firestore'
-import { Download, Plus, Search, Trash2, Upload, Pencil } from 'lucide-react'
+import {
+  ChevronDown,
+  ChevronUp,
+  ChevronsUpDown,
+  Download,
+  Pencil,
+  Plus,
+  Search,
+  Trash2,
+  Upload,
+} from 'lucide-react'
 import { db } from '../lib/firebase'
 import PageHeader from '../components/PageHeader'
 import {
@@ -35,6 +43,8 @@ import {
 import type { MediaContact } from '../types'
 import { contactsToCsv, parseContactsCsv } from '../lib/csv'
 
+type SortKey = 'outlet' | 'name' | 'title' | 'email' | 'language'
+
 const BLANK: Omit<MediaContact, 'id'> = {
   name: '',
   email: '',
@@ -52,14 +62,18 @@ export default function ContactsPage() {
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState<ListId | 'all'>('all')
   const [search, setSearch] = useState('')
+  const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({
+    key: 'outlet',
+    asc: true,
+  })
   const [editing, setEditing] = useState<MediaContact | null>(null)
   const [draft, setDraft] = useState(BLANK)
   const [saving, setSaving] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
 
   useEffect(() => {
-    const q = query(collection(db, 'mediaContacts'), orderBy('name'))
-    return onSnapshot(q, (snap) => {
+    // 不在查詢端排序：Firestore 的 orderBy 會排除缺少該欄位的文件，排序改在前端做
+    return onSnapshot(collection(db, 'mediaContacts'), (snap) => {
       setContacts(
         snap.docs.map((d) => ({ id: d.id, ...d.data() }) as MediaContact),
       )
@@ -80,14 +94,22 @@ export default function ContactsPage() {
 
   const visible = useMemo(() => {
     const kw = search.trim().toLowerCase()
-    return contacts.filter((c) => {
+    const rows = contacts.filter((c) => {
       if (tab !== 'all' && !(c.lists ?? []).includes(tab)) return false
       if (!kw) return true
       return [c.name, c.email, c.outlet, c.title, c.phone]
         .filter(Boolean)
         .some((v) => v.toLowerCase().includes(kw))
     })
-  }, [contacts, tab, search])
+
+    const dir = sort.asc ? 1 : -1
+    return rows.sort((a, b) => {
+      const av = (a[sort.key] ?? '') as string
+      const bv = (b[sort.key] ?? '') as string
+      // 中文用 localeCompare 才會照筆劃/拼音排，不然會變成 Unicode 碼順序
+      return av.localeCompare(bv, 'zh-Hant') * dir
+    })
+  }, [contacts, tab, search, sort])
 
   function openNew() {
     setEditing(null)
@@ -224,12 +246,23 @@ export default function ContactsPage() {
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-left text-xs text-slate-500">
                 <tr>
-                  <Th>姓名</Th>
-                  <Th>Email</Th>
-                  <Th>媒體 / 職稱</Th>
+                  <SortTh sortKey="outlet" sort={sort} setSort={setSort}>
+                    媒體
+                  </SortTh>
+                  <SortTh sortKey="name" sort={sort} setSort={setSort}>
+                    姓名
+                  </SortTh>
+                  <SortTh sortKey="title" sort={sort} setSort={setSort}>
+                    職稱
+                  </SortTh>
+                  <SortTh sortKey="email" sort={sort} setSort={setSort}>
+                    Email
+                  </SortTh>
                   <Th>電話</Th>
                   <Th>所屬名單</Th>
-                  <Th>語言</Th>
+                  <SortTh sortKey="language" sort={sort} setSort={setSort}>
+                    語言
+                  </SortTh>
                   <Th className="w-24 text-right">操作</Th>
                 </tr>
               </thead>
@@ -240,26 +273,22 @@ export default function ContactsPage() {
                     className={c.active === false ? 'opacity-45' : ''}
                   >
                     <Td>
-                      {c.name ? (
-                        <span className="font-medium text-slate-900">
-                          {c.name}
-                        </span>
-                      ) : (
-                        <span className="text-slate-400">（未填姓名）</span>
-                      )}
+                      <span className="font-medium text-slate-900">
+                        {c.outlet || '—'}
+                      </span>
                       {c.active === false && (
                         <span className="ml-2 text-xs text-slate-400">
                           （停用）
                         </span>
                       )}
                     </Td>
-                    <Td className="text-slate-600">{c.email}</Td>
-                    <Td className="text-slate-600">
-                      {c.outlet}
-                      {c.title && (
-                        <span className="text-slate-400"> · {c.title}</span>
+                    <Td className="text-slate-700">
+                      {c.name || (
+                        <span className="text-slate-400">（未填姓名）</span>
                       )}
                     </Td>
+                    <Td className="text-slate-500">{c.title || '—'}</Td>
+                    <Td className="text-slate-600">{c.email}</Td>
                     <Td className="whitespace-nowrap text-slate-500">
                       {c.phone || '—'}
                     </Td>
@@ -616,6 +645,44 @@ function Th({
 }) {
   return (
     <th className={`px-4 py-3 font-medium ${className}`}>{children}</th>
+  )
+}
+
+/** 可點擊排序的表頭。再點一次切換升冪／降冪。 */
+function SortTh({
+  sortKey,
+  sort,
+  setSort,
+  children,
+}: {
+  sortKey: SortKey
+  sort: { key: SortKey; asc: boolean }
+  setSort: (s: { key: SortKey; asc: boolean }) => void
+  children: React.ReactNode
+}) {
+  const active = sort.key === sortKey
+  return (
+    <th className="px-4 py-3 font-medium">
+      <button
+        onClick={() =>
+          setSort({ key: sortKey, asc: active ? !sort.asc : true })
+        }
+        className={`flex items-center gap-1 transition hover:text-slate-800 ${
+          active ? 'text-slate-800' : ''
+        }`}
+      >
+        {children}
+        {active ? (
+          sort.asc ? (
+            <ChevronUp className="size-3.5" />
+          ) : (
+            <ChevronDown className="size-3.5" />
+          )
+        ) : (
+          <ChevronsUpDown className="size-3.5 opacity-30" />
+        )}
+      </button>
+    </th>
   )
 }
 

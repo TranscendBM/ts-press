@@ -1,5 +1,13 @@
 import { NavLink, Outlet } from 'react-router-dom'
-import { FileText, Users, Send, BarChart3, LogOut, Settings } from 'lucide-react'
+import {
+  BarChart3,
+  FileText,
+  HeartHandshake,
+  LogOut,
+  Send,
+  Settings,
+  Users,
+} from 'lucide-react'
 import { useAuth } from '../lib/AuthContext'
 import { ROLE_LABELS } from '../constants'
 
@@ -8,6 +16,7 @@ const NAV = [
   { to: '/contacts', label: '媒體名單', icon: Users },
   { to: '/send', label: '發送', icon: Send },
   { to: '/campaigns', label: '發送紀錄', icon: BarChart3 },
+  { to: '/events', label: '媒體關係', icon: HeartHandshake },
 ]
 
 export default function Layout() {

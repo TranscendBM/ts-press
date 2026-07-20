@@ -1,5 +1,11 @@
 import type { Timestamp } from 'firebase/firestore'
-import type { Category, Language, ListId, Role } from './constants'
+import type {
+  Category,
+  EventType,
+  Language,
+  ListId,
+  Role,
+} from './constants'
 
 /** 白名單使用者，文件 id 就是 email。 */
 export interface AppUser {
@@ -80,6 +86,33 @@ export interface PressRelease {
  * 走 mail2000 SMTP 寄送，只能知道伺服器有沒有收下這封信，
  * 沒有開信 / 點擊 / 退信回報。
  */
+/**
+ * 媒體關係經營的活動：餐敘、茶會、年節禮品等。
+ * 每位媒體的參加／贈送紀錄放在 participants 子集合，文件 id 就是 contactId。
+ */
+export interface MediaEvent {
+  id: string
+  name: string
+  type: EventType
+  /** 活動日期，格式 yyyy-mm-dd。 */
+  date: string
+  /** 由 date 推導，用於依年份分組。 */
+  year: number
+  note: string
+  createdBy: string
+  createdAt?: Timestamp
+  updatedAt?: Timestamp
+}
+
+/** 某位媒體在某場活動的紀錄。 */
+export interface EventParticipant {
+  contactId: string
+  /** 出席（餐敘／茶會）或已致贈（禮品）。 */
+  attended: boolean
+  note: string
+  updatedAt?: Timestamp
+}
+
 export type RecipientStatus = 'queued' | 'sent' | 'failed'
 
 export interface CampaignRecipient {
