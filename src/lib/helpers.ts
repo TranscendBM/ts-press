@@ -19,6 +19,13 @@ export function formatDate(ts?: Timestamp): string {
   })
 }
 
+/** 今天的 yyyy-mm-dd，用於新聞稿發佈日期預設值。 */
+export function todayIso(): string {
+  const d = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`

@@ -30,6 +30,21 @@ export async function uploadPressFile(
   }
 }
 
+/** 上傳信件頁首 logo 等品牌素材。 */
+export async function uploadBrandingFile(file: File): Promise<StoredFile> {
+  const path = `branding/${Date.now()}_${safeName(file.name)}`
+  const objectRef = ref(storage, path)
+  await uploadBytes(objectRef, file, { contentType: file.type })
+  const url = await getDownloadURL(objectRef)
+  return {
+    name: file.name,
+    path,
+    url,
+    size: file.size,
+    contentType: file.type,
+  }
+}
+
 export async function deletePressFile(path: string): Promise<void> {
   try {
     await deleteObject(ref(storage, path))

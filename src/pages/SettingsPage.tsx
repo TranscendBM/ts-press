@@ -13,6 +13,7 @@ import { useAuth } from '../lib/AuthContext'
 import PageHeader from '../components/PageHeader'
 import { Badge, Button, Field, Modal, Select, TextInput } from '../components/ui'
 import SmtpSettingsCard from '../components/SmtpSettingsCard'
+import PressContactsCard from '../components/PressContactsCard'
 import { ROLES, ROLE_LABELS, type Role } from '../constants'
 import type { AppUser } from '../types'
 
@@ -113,6 +114,7 @@ export default function SettingsPage() {
       />
 
       <div className="space-y-6 p-8">
+        <PressContactsCard />
         <SmtpSettingsCard />
 
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">

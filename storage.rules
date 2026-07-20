@@ -11,6 +11,13 @@ service firebase.storage {
         && request.auth.token.pressCenter == true;
     }
 
+    // 信件頁首 logo 等品牌素材
+    match /branding/{allPaths=**} {
+      allow read: if isPressCenterUser();
+      allow write: if isPressCenterUser()
+        && request.resource.size < 2 * 1024 * 1024;
+    }
+
     // 新聞稿的內嵌圖與附件
     match /press/{pressId}/{allPaths=**} {
       allow read: if isPressCenterUser();

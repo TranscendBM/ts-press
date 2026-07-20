@@ -12,7 +12,11 @@ import { SecretManagerServiceClient } from '@google-cloud/secret-manager'
 import nodemailer from 'nodemailer'
 import * as tls from 'node:tls'
 import { SECTIGO_INTERMEDIATE_CA } from './smtpCa'
-import { renderEmailHtml, renderEmailText } from './emailTemplate'
+import {
+  renderEmailHtml,
+  renderEmailText,
+  type PressContact,
+} from './emailTemplate'
 
 initializeApp()
 setGlobalOptions({ region: 'asia-east1', maxInstances: 5 })
@@ -214,9 +218,18 @@ export const sendCampaign = onCall<SendRequest>(
     const press = pressSnap.data() as {
       title: string
       category: string
+      releaseDate?: string
       versions: Record<Language, Version>
       attachments?: { name: string; path: string; contentType?: string }[]
     }
+
+    // 頁首 logo 與各語言的新聞聯絡人
+    const emailSettings =
+      (await db.doc('settings/email').get()).data() ??
+      ({} as {
+        logoUrl?: string
+        contacts?: Record<Language, PressContact>
+      })
 
     // 收件人：測試信寄給自己，正式發送依勾選名單展開並以 email 去重
     let recipients: Contact[] = []
@@ -322,6 +335,9 @@ export const sendCampaign = onCall<SendRequest>(
         heroImageUrl: version.heroImage?.url,
         recipientName: r.name,
         language: r.language,
+        releaseDate: press.releaseDate,
+        logoUrl: emailSettings.logoUrl,
+        contact: emailSettings.contacts?.[r.language],
       }
       try {
         await transporter.sendMail({

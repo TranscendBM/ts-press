@@ -22,7 +22,7 @@ import {
   type Category,
   type Language,
 } from '../constants'
-import type { PressRelease, StoredFile } from '../types'
+import type { EmailSettings, PressRelease, StoredFile } from '../types'
 import { blankVersions, formatBytes } from '../lib/helpers'
 import { deletePressFile, uploadPressFile } from '../lib/storage'
 import { renderEmailHtml } from '../lib/emailTemplate'
@@ -42,6 +42,14 @@ export default function PressEditPage() {
 
   const heroInput = useRef<HTMLInputElement>(null)
   const attachInput = useRef<HTMLInputElement>(null)
+  // 預覽要跟實際寄出的信一致，所以 logo 與新聞聯絡人也要帶進來
+  const [emailSettings, setEmailSettings] = useState<EmailSettings | null>(null)
+
+  useEffect(() => {
+    getDoc(doc(db, 'settings', 'email')).then((snap) => {
+      if (snap.exists()) setEmailSettings(snap.data() as EmailSettings)
+    })
+  }, [])
 
   useEffect(() => {
     if (!id) return
@@ -214,7 +222,7 @@ export default function PressEditPage() {
           </div>
         )}
 
-        <div className="mb-6 grid grid-cols-3 gap-4 rounded-xl border border-slate-200 bg-white p-5">
+        <div className="mb-6 grid grid-cols-4 gap-4 rounded-xl border border-slate-200 bg-white p-5">
           <div className="col-span-2">
             <Field label="稿件標題（僅供後台辨識）">
               <TextInput
@@ -236,6 +244,15 @@ export default function PressEditPage() {
                 </option>
               ))}
             </Select>
+          </Field>
+          <Field label="發佈日期" hint="顯示在信件標題下方。">
+            <TextInput
+              type="date"
+              value={press.releaseDate ?? ''}
+              onChange={(e) =>
+                patch((p) => ({ ...p, releaseDate: e.target.value }))
+              }
+            />
           </Field>
         </div>
 
@@ -277,7 +294,7 @@ export default function PressEditPage() {
 
             <Field
               label="內文"
-              hint="以純文字撰寫；空一行代表分段，寄出時會自動套用排版樣式。網址會自動變成連結。"
+              hint="空一行代表分段。開頭加「## 」的行會變成小標題。網址會自動變成連結。"
             >
               <TextArea
                 rows={16}
@@ -403,6 +420,9 @@ export default function PressEditPage() {
             heroImageUrl: version.heroImage?.url,
             recipientName: '',
             language: lang,
+            releaseDate: press.releaseDate,
+            logoUrl: emailSettings?.logoUrl,
+            contact: emailSettings?.contacts?.[lang],
           })}
         />
       </Modal>

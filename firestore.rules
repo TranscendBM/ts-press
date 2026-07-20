@@ -26,11 +26,17 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
-    // 寄信設定：只放非機密欄位（主機／埠／帳號／Reply-To），
+    // SMTP 連線設定：只放非機密欄位（主機／埠／帳號／Reply-To），
     // 密碼存在 Secret Manager。寫入一律經 updateSmtpSettings function。
-    match /settings/{docId} {
+    match /settings/smtp {
       allow read: if isAdmin();
       allow write: if false;
+    }
+
+    // 信件頁首與新聞聯絡人：編輯稿件時要預覽，所以全員可讀；只有 admin 能改。
+    match /settings/email {
+      allow read: if isWhitelisted();
+      allow write: if isAdmin();
     }
 
     // 媒體名單：白名單使用者皆可維護

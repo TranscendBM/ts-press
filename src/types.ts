@@ -47,10 +47,26 @@ export interface StoredFile {
   contentType: string
 }
 
+/** 每個語言版本各自的新聞聯絡人，存在 settings/email。 */
+export interface PressContact {
+  name: string
+  company: string
+  email: string
+  phone: string
+}
+
+export interface EmailSettings {
+  /** 頁首 logo，建議透明背景 PNG。 */
+  logoUrl?: string
+  contacts?: Record<Language, PressContact>
+}
+
 export interface PressRelease {
   id: string
   title: string
   category: Category
+  /** 新聞稿發佈日期，格式 yyyy-mm-dd，顯示在標題下方。 */
+  releaseDate?: string
   versions: Record<Language, PressVersion>
   /** 附件為三個版本共用。 */
   attachments: StoredFile[]
