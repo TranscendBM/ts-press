@@ -60,7 +60,11 @@ export const ROLE_LABELS: Record<Role, string> = {
   editor: '編輯',
 }
 
-export const SENDER_EMAIL = 'press_center@transcend-info.com'
+/**
+ * 記者按「回信」時會進的信箱。實際寄件帳號設定在 Cloud Functions 的
+ * SMTP_USER 密鑰，這裡只用於介面顯示。
+ */
+export const REPLY_TO_EMAIL = 'press_center@transcend-info.com'
 
 /**
  * 登入不限網域（公司信箱用 mail2000，沒有對應的 Google 帳號），

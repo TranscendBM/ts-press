@@ -77,21 +77,33 @@ Firestore → 建立集合 `users` → 文件 ID 填**你登入用的那個 Goog
 
 ### 4. mail2000 SMTP
 
-向 IT 取得 `press_center@transcend-info.com` 的 SMTP 連線資訊，並確認兩件事：
+公司郵件主機是 **Mail2000 V8.00**，`email.transcend-info.com`，587 埠支援 `AUTH LOGIN` + `STARTTLS`。
 
-- **mail2000 允許從外部 IP 以 SMTP 認證寄信**。Cloud Functions 跑在 Google 機房，
-  對 mail2000 而言是外部連線；若伺服器只開放內網轉寄，這套方案無法運作。
-- **不需要 IP 白名單**。Cloud Functions 的對外 IP 是浮動的，若 IT 堅持要鎖 IP，
-  必須另外架設 VPC 連接器與 Cloud NAT 取得固定 IP（會產生額外費用）。
+該網域使用 split-horizon DNS，查詢來源不同會得到不同位址：
+
+| 查詢來源 | 解析結果 |
+|---|---|
+| 公司內網 | `10.0.0.150`（內網位址） |
+| 外部（含 Cloud Functions） | `59.124.102.36`（對外位址） |
+
+在公司內網 debug 時要記得這件事，內網查到的私有位址不代表外部連不到。
+網域的 SPF 已涵蓋這台主機（`ip4:59.124.102.34/27`），寄出的信會通過 SPF 驗證。
 
 ### 5. 設定密鑰
 
 ```bash
-npx firebase functions:secrets:set SMTP_HOST   # 例如 mail.transcend-info.com
-npx firebase functions:secrets:set SMTP_PORT   # 587（STARTTLS）或 465（SSL）
-npx firebase functions:secrets:set SMTP_USER   # press_center@transcend-info.com
-npx firebase functions:secrets:set SMTP_PASS   # 該信箱的密碼
+npx firebase functions:secrets:set SMTP_HOST      # email.transcend-info.com
+npx firebase functions:secrets:set SMTP_PORT      # 587
+npx firebase functions:secrets:set SMTP_USER      # elvis_cheng@transcend-info.com
+npx firebase functions:secrets:set SMTP_PASS      # 該帳號的密碼
+npx firebase functions:secrets:set SMTP_REPLY_TO  # press_center@transcend-info.com
 ```
+
+> **一定要用 port 587，不能用 25。** Google Cloud 封鎖所有對外部 IP 的 port 25 連線，
+> Cloud Functions 也適用。mail2000 的 587 支援 `AUTH LOGIN` + `STARTTLS`，程式會強制加密連線。
+
+> `press_center@` 是群組信箱、不是可登入的帳號，所以認證與寄件地址都用個人帳號，
+> 再把 `Reply-To` 指向群組信箱，記者回信全組都看得到。
 
 > 密碼只存在 Google Secret Manager，不會進版控。發送前程式會先 `verify()` 連線，
 > 連不上會直接回報錯誤而不會送出半套。

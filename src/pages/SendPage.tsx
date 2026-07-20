@@ -13,7 +13,7 @@ import {
   LANGUAGE_LABELS,
   LISTS,
   LIST_LABELS,
-  SENDER_EMAIL,
+  REPLY_TO_EMAIL,
   type Language,
   type ListId,
 } from '../constants'
@@ -146,7 +146,7 @@ export default function SendPage() {
     <>
       <PageHeader
         title="發送新聞稿"
-        description={`寄件人 ${SENDER_EMAIL}，系統會一位記者寄出一封獨立信件。`}
+        description={`透過公司 mail2000 寄出，一位記者一封獨立信件；記者回信會進 ${REPLY_TO_EMAIL}。`}
       />
 
       <div className="max-w-4xl space-y-6 p-8">

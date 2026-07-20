@@ -14,15 +14,17 @@ import { renderEmailHtml, renderEmailText } from './emailTemplate'
 initializeApp()
 setGlobalOptions({ region: 'asia-east1', maxInstances: 5 })
 
-// mail2000 的 SMTP 連線資訊，用 firebase functions:secrets:set 設定
+// mail2000 的 SMTP 連線資訊，用 firebase functions:secrets:set 設定。
+// 注意：port 要用 587（STARTTLS），Google Cloud 封鎖對外的 port 25。
 const SMTP_HOST = defineSecret('SMTP_HOST')
 const SMTP_PORT = defineSecret('SMTP_PORT')
 const SMTP_USER = defineSecret('SMTP_USER')
 const SMTP_PASS = defineSecret('SMTP_PASS')
+// 記者按回信時要進哪個信箱，通常設成 press_center 群組信箱讓全組都看得到
+const SMTP_REPLY_TO = defineSecret('SMTP_REPLY_TO')
 
 const db = getFirestore()
 
-const SENDER_EMAIL = 'press_center@transcend-info.com'
 const SENDER_NAME_BY_LANG = {
   tw: '創見資訊 新聞中心',
   www: 'Transcend Press Center',
@@ -100,7 +102,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 export const sendCampaign = onCall<SendRequest>(
   {
-    secrets: [SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS],
+    secrets: [SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_REPLY_TO],
     timeoutSeconds: 540,
     memory: '512MiB',
   },
@@ -183,6 +185,8 @@ export const sendCampaign = onCall<SendRequest>(
       host: SMTP_HOST.value(),
       port,
       secure: port === 465,
+      // 587 走 STARTTLS。強制加密，否則 AUTH LOGIN 的帳密等同明文傳送。
+      requireTLS: port !== 465,
       auth: { user: SMTP_USER.value(), pass: SMTP_PASS.value() },
       // 連線重複使用，避免每封信都重新握手被伺服器當成異常流量
       pool: true,
@@ -243,8 +247,9 @@ export const sendCampaign = onCall<SendRequest>(
       try {
         await transporter.sendMail({
           to: r.name ? `"${r.name.replace(/"/g, '')}" <${r.email}>` : r.email,
-          from: `"${SENDER_NAME_BY_LANG[r.language]}" <${SENDER_EMAIL}>`,
-          replyTo: SENDER_EMAIL,
+          // 寄件地址必須與認證帳號一致，否則 mail2000 會拒收
+          from: `"${SENDER_NAME_BY_LANG[r.language]}" <${SMTP_USER.value()}>`,
+          replyTo: SMTP_REPLY_TO.value() || SMTP_USER.value(),
           subject: `${isTest ? '[測試] ' : ''}${version.subject}`,
           text: renderEmailText(templateInput),
           html: renderEmailHtml(templateInput),
