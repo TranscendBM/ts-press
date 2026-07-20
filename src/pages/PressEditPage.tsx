@@ -4,6 +4,8 @@ import { doc, getDoc, serverTimestamp, updateDoc } from 'firebase/firestore'
 import {
   ArrowLeft,
   Eye,
+  FileDown,
+  FileType,
   ImageIcon,
   Paperclip,
   Save,
@@ -26,6 +28,7 @@ import type { EmailSettings, PressRelease, StoredFile } from '../types'
 import { blankVersions, formatBytes } from '../lib/helpers'
 import { deletePressFile, uploadPressFile } from '../lib/storage'
 import { renderEmailHtml } from '../lib/emailTemplate'
+import { downloadPdf, downloadWord } from '../lib/exportDoc'
 
 export default function PressEditPage() {
   const { id } = useParams<{ id: string }>()
@@ -182,6 +185,19 @@ export default function PressEditPage() {
   const version = press.versions[lang]
   const attachTotal = press.attachments.reduce((s, a) => s + a.size, 0)
 
+  // 下載與預覽共用同一份資料，確保看到的跟寄出的一致
+  const templateInput = {
+    subject: version.subject || '（尚未填寫主旨）',
+    bodyText: version.bodyText || '（尚未填寫內文）',
+    heroImageUrl: version.heroImage?.url,
+    recipientName: '',
+    language: lang,
+    releaseDate: press.releaseDate,
+    logoUrl: emailSettings?.logoUrl,
+    contact: emailSettings?.contacts?.[lang],
+  }
+  const downloadName = `${press.title || '新聞稿'}_${lang}`
+
   return (
     <>
       <PageHeader
@@ -196,6 +212,14 @@ export default function PressEditPage() {
             <Button onClick={() => setPreviewOpen(true)}>
               <Eye className="size-4" />
               預覽
+            </Button>
+            <Button onClick={() => downloadWord(templateInput, downloadName)}>
+              <FileType className="size-4" />
+              Word
+            </Button>
+            <Button onClick={() => downloadPdf(templateInput, downloadName)}>
+              <FileDown className="size-4" />
+              PDF
             </Button>
             <Button variant="primary" onClick={save} disabled={saving || !dirty}>
               <Save className="size-4" />
@@ -414,16 +438,7 @@ export default function PressEditPage() {
         <iframe
           title="email-preview"
           className="h-[60vh] w-full rounded-lg border border-slate-200"
-          srcDoc={renderEmailHtml({
-            subject: version.subject || '（尚未填寫主旨）',
-            bodyText: version.bodyText || '（尚未填寫內文）',
-            heroImageUrl: version.heroImage?.url,
-            recipientName: '',
-            language: lang,
-            releaseDate: press.releaseDate,
-            logoUrl: emailSettings?.logoUrl,
-            contact: emailSettings?.contacts?.[lang],
-          })}
+          srcDoc={renderEmailHtml(templateInput)}
         />
       </Modal>
     </>

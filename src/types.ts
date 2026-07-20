@@ -77,6 +77,8 @@ export interface PressRelease {
   /** 附件為三個版本共用。 */
   attachments: StoredFile[]
   status: 'draft' | 'sent'
+  /** 封存後移到列表下方，不影響已發送的紀錄。 */
+  archived?: boolean
   createdBy: string
   createdAt?: Timestamp
   updatedAt?: Timestamp

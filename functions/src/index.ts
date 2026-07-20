@@ -148,10 +148,23 @@ interface Contact {
   active?: boolean
 }
 
+/**
+ * 三種發送模式。刻意用獨立的 mode 而不是一個 isTest 布林值 ——
+ * 正式發送與測試發送在後端就是不同分支，減少誤發的可能。
+ *
+ * - self：只寄給操作者本人，已填寫的每個語言版本各一封
+ * - testList：寄給「測試名單」裡的內部同仁，流程與正式發送相同
+ * - real：正式發送給勾選的媒體名單，需要 admin / manager 權限
+ */
+type SendMode = 'self' | 'testList' | 'real'
+
+/** 測試名單只能由測試模式觸發，正式發送一律排除。 */
+const TEST_LIST_ID = 'test'
+
 interface SendRequest {
   pressReleaseId: string
-  targetLists: string[]
-  isTest: boolean
+  targetLists?: string[]
+  mode: SendMode
 }
 
 /** 確認呼叫者在白名單內；正式發送另外要求 admin / manager。 */
@@ -201,12 +214,17 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 export const sendCampaign = onCall<SendRequest>(
   { secrets: [SMTP_PASS], timeoutSeconds: 540, memory: '512MiB' },
   async (request) => {
-    const { pressReleaseId, targetLists, isTest } = request.data ?? {}
+    const { pressReleaseId, targetLists, mode } = request.data ?? {}
     if (!pressReleaseId) {
       throw new HttpsError('invalid-argument', '缺少新聞稿 ID。')
     }
+    if (mode !== 'self' && mode !== 'testList' && mode !== 'real') {
+      throw new HttpsError('invalid-argument', '發送模式不正確。')
+    }
+    const isTest = mode !== 'real'
 
-    const user = await authorize(request.auth?.token?.email, !isTest)
+    // 只有正式發送需要 admin / manager 權限
+    const user = await authorize(request.auth?.token?.email, mode === 'real')
 
     const pressSnap = await db
       .collection('pressReleases')
@@ -231,9 +249,23 @@ export const sendCampaign = onCall<SendRequest>(
         contacts?: Record<Language, PressContact>
       })
 
-    // 收件人：測試信寄給自己，正式發送依勾選名單展開並以 email 去重
+    /** 依名單展開收件人，同一個 email 只留一份。 */
+    async function expandLists(lists: string[]): Promise<Contact[]> {
+      const contactsSnap = await db.collection('mediaContacts').get()
+      const byEmail = new Map<string, Contact>()
+      for (const doc of contactsSnap.docs) {
+        const c = { id: doc.id, ...doc.data() } as Contact
+        if (c.active === false) continue
+        if (!(c.lists ?? []).some((l) => lists.includes(l))) continue
+        if (!byEmail.has(c.email)) byEmail.set(c.email, c)
+      }
+      return Array.from(byEmail.values())
+    }
+
     let recipients: Contact[] = []
-    if (isTest) {
+    let effectiveLists: string[] = []
+
+    if (mode === 'self') {
       const langs = LANGUAGES.filter((l) => {
         const v = press.versions?.[l]
         return v?.subject?.trim() && v?.bodyText?.trim()
@@ -242,28 +274,34 @@ export const sendCampaign = onCall<SendRequest>(
         throw new HttpsError('failed-precondition', '沒有任何已填寫的語言版本。')
       }
       recipients = langs.map((l) => ({
-        id: `test_${l}`,
+        id: `self_${l}`,
         name: user.displayName ?? '',
         email: user.email,
         outlet: '（測試信）',
         language: l,
       }))
+    } else if (mode === 'testList') {
+      effectiveLists = [TEST_LIST_ID]
+      recipients = await expandLists(effectiveLists)
+      if (recipients.length === 0) {
+        throw new HttpsError(
+          'failed-precondition',
+          '測試名單沒有任何聯絡人，請先到媒體名單把同仁加進「測試名單」。',
+        )
+      }
     } else {
-      if (!targetLists || targetLists.length === 0) {
-        throw new HttpsError('invalid-argument', '請至少勾選一個名單。')
+      // 正式發送：測試名單一律排除，避免內部信箱混進真實發稿
+      effectiveLists = (targetLists ?? []).filter((l) => l !== TEST_LIST_ID)
+      if (effectiveLists.length === 0) {
+        throw new HttpsError('invalid-argument', '請至少勾選一個媒體名單。')
       }
-      const contactsSnap = await db.collection('mediaContacts').get()
-      const byEmail = new Map<string, Contact>()
-      for (const doc of contactsSnap.docs) {
-        const c = { id: doc.id, ...doc.data() } as Contact
-        if (c.active === false) continue
-        if (!(c.lists ?? []).some((l) => targetLists.includes(l))) continue
-        if (!byEmail.has(c.email)) byEmail.set(c.email, c)
-      }
-      recipients = Array.from(byEmail.values())
+      recipients = await expandLists(effectiveLists)
       if (recipients.length === 0) {
         throw new HttpsError('failed-precondition', '勾選的名單沒有任何收件人。')
       }
+    }
+
+    if (mode !== 'self') {
       // 有人要收的語言版本一定要填完，否則整批擋下
       const missing = LANGUAGES.filter(
         (l) =>
@@ -302,8 +340,9 @@ export const sendCampaign = onCall<SendRequest>(
       pressReleaseId,
       pressTitle: press.title,
       category: press.category,
-      targetLists: isTest ? [] : targetLists,
-      isTest: !!isTest,
+      targetLists: effectiveLists,
+      mode,
+      isTest,
       sentBy: user.email,
       sentAt: FieldValue.serverTimestamp(),
       status: 'sending',
@@ -345,6 +384,8 @@ export const sendCampaign = onCall<SendRequest>(
           from: `"${SENDER_NAME_BY_LANG[r.language]}" <${settings.fromEmail}>`,
           replyTo: settings.replyTo,
           subject: `${isTest ? '[測試] ' : ''}${version.subject}`,
+          // 測試信加上標頭，萬一誤轉寄也看得出不是正式發稿
+          headers: isTest ? { 'X-Press-Center-Test': 'true' } : undefined,
           text: renderEmailText(templateInput),
           html: renderEmailHtml(templateInput),
           attachments,

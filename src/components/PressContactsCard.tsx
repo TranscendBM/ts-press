@@ -24,8 +24,23 @@ export default function PressContactsCard() {
   const [uploading, setUploading] = useState(false)
   const [message, setMessage] = useState('')
   const logoInput = useRef<HTMLInputElement>(null)
+  const uiLogoInput = useRef<HTMLInputElement>(null)
+  const [uiLogoUrl, setUiLogoUrl] = useState('')
+  const [savedUiLogo, setSavedUiLogo] = useState('')
 
-  async function onLogoPick(e: React.ChangeEvent<HTMLInputElement>) {
+  // 介面 logo 放在公開可讀的 settings/branding，登入頁在驗證前就要顯示
+  useEffect(() => {
+    return onSnapshot(doc(db, 'settings', 'branding'), (snap) => {
+      const url = (snap.data()?.uiLogoUrl as string) ?? ''
+      setSavedUiLogo(url)
+      setUiLogoUrl(url)
+    })
+  }, [])
+
+  async function onPick(
+    e: React.ChangeEvent<HTMLInputElement>,
+    set: (url: string) => void,
+  ) {
     const file = e.target.files?.[0]
     e.target.value = ''
     if (!file) return
@@ -33,7 +48,7 @@ export default function PressContactsCard() {
     setMessage('')
     try {
       const stored = await uploadBrandingFile(file)
-      setLogoUrl(stored.url)
+      set(stored.url)
       setMessage('Logo 已上傳，記得按下方「儲存」才會生效。')
     } catch {
       setMessage('Logo 上傳失敗，請確認檔案小於 2MB。')
@@ -41,6 +56,9 @@ export default function PressContactsCard() {
       setUploading(false)
     }
   }
+
+  const onLogoPick = (e: React.ChangeEvent<HTMLInputElement>) =>
+    onPick(e, setLogoUrl)
 
   useEffect(() => {
     return onSnapshot(doc(db, 'settings', 'email'), (snap) => {
@@ -62,11 +80,18 @@ export default function PressContactsCard() {
     setSaving(true)
     setMessage('')
     try {
-      await setDoc(
-        doc(db, 'settings', 'email'),
-        { logoUrl: logoUrl.trim(), contacts, updatedAt: serverTimestamp() },
-        { merge: true },
-      )
+      await Promise.all([
+        setDoc(
+          doc(db, 'settings', 'email'),
+          { logoUrl: logoUrl.trim(), contacts, updatedAt: serverTimestamp() },
+          { merge: true },
+        ),
+        setDoc(
+          doc(db, 'settings', 'branding'),
+          { uiLogoUrl: uiLogoUrl.trim(), updatedAt: serverTimestamp() },
+          { merge: true },
+        ),
+      ])
       setMessage('已儲存。')
     } catch {
       setMessage('儲存失敗，請稍後再試。')
@@ -77,6 +102,7 @@ export default function PressContactsCard() {
 
   const dirty =
     logoUrl.trim() !== (saved?.logoUrl ?? '') ||
+    uiLogoUrl.trim() !== savedUiLogo ||
     JSON.stringify(contacts) !==
       JSON.stringify({ ...blankContacts(), ...(saved?.contacts ?? {}) })
 
@@ -152,6 +178,61 @@ export default function PressContactsCard() {
           <ImageIcon className="size-3.5" />
           這是信件頁首的實際樣子（底色 #960014）
         </p>
+
+        <div className="mt-6">
+          <Field
+            label="系統介面 Logo"
+            hint="顯示在登入頁與左側選單。這裡是白底，要用深色版本的 logo。"
+          >
+            <div className="flex gap-2">
+              <TextInput
+                value={uiLogoUrl}
+                onChange={(e) => setUiLogoUrl(e.target.value)}
+                placeholder="上傳圖片，或直接貼上網址"
+              />
+              <Button
+                onClick={() => uiLogoInput.current?.click()}
+                disabled={uploading}
+                className="shrink-0"
+              >
+                <Upload className="size-4" />
+                上傳
+              </Button>
+              {uiLogoUrl && (
+                <Button
+                  variant="ghost"
+                  onClick={() => setUiLogoUrl('')}
+                  className="shrink-0"
+                >
+                  清除
+                </Button>
+              )}
+            </div>
+            <input
+              ref={uiLogoInput}
+              type="file"
+              accept="image/png,image/jpeg,image/svg+xml"
+              hidden
+              onChange={(e) => onPick(e, setUiLogoUrl)}
+            />
+          </Field>
+          <div className="mt-3 flex h-16 items-center rounded-lg border border-slate-200 bg-white px-6">
+            {uiLogoUrl.trim() ? (
+              <img
+                src={uiLogoUrl}
+                alt="介面 logo 預覽"
+                className="h-7 w-auto"
+                onError={(e) => {
+                  e.currentTarget.style.display = 'none'
+                }}
+              />
+            ) : (
+              <span className="text-sm text-slate-400">
+                未設定，介面會顯示預設圖示
+              </span>
+            )}
+          </div>
+        </div>
       </div>
 
       <div className="space-y-5">

@@ -39,6 +39,13 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    // 系統介面的 logo。登入頁在通過驗證前就要顯示，所以必須公開可讀；
+    // 內容只有一個圖片網址，沒有機密資訊。
+    match /settings/branding {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
     // 媒體名單：白名單使用者皆可維護
     match /mediaContacts/{id} {
       allow read, write: if isWhitelisted();

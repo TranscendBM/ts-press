@@ -20,8 +20,10 @@ import {
 import type { MediaContact, PressRelease } from '../types'
 import { blankVersions, formatBytes } from '../lib/helpers'
 
+type SendMode = 'self' | 'testList' | 'real'
+
 const sendCampaign = httpsCallable<
-  { pressReleaseId: string; targetLists: ListId[]; isTest: boolean },
+  { pressReleaseId: string; targetLists?: ListId[]; mode: SendMode },
   { campaignId: string; recipients: number }
 >(functions, 'sendCampaign')
 
@@ -112,21 +114,26 @@ export default function SendPage() {
     )
   }
 
-  async function run(isTest: boolean) {
+  async function run(mode: SendMode) {
     if (!press) return
     setBusy(true)
     setMessage(null)
     try {
       const res = await sendCampaign({
         pressReleaseId: press.id,
-        targetLists: selected,
-        isTest,
+        targetLists: mode === 'real' ? selected : undefined,
+        mode,
       })
       setConfirmOpen(false)
-      if (isTest) {
+      if (mode === 'self') {
         setMessage({
           tone: 'ok',
-          text: `測試信已寄出至 ${appUser?.email}，請到信箱確認排版與附件。`,
+          text: `測試信已寄至 ${appUser?.email}，請到信箱確認排版、圖片與附件。`,
+        })
+      } else if (mode === 'testList') {
+        setMessage({
+          tone: 'ok',
+          text: `已寄給測試名單共 ${res.data.recipients} 位，可到發送紀錄查看結果。`,
         })
       } else {
         navigate(`/campaigns/${res.data.campaignId}`)
@@ -217,40 +224,61 @@ export default function SendPage() {
 
         <Card step="2" title="寄送測試信">
           <p className="mb-4 text-sm text-slate-500">
-            正式發送前務必先試寄，確認排版、圖片與附件都正確。測試信只會寄給你自己，
-            不會碰到任何媒體名單。
-          </p>
-          <Button
-            onClick={() => run(true)}
-            disabled={busy || !press || missingVersions.length > 0}
-          >
-            <TestTube2 className="size-4" />
-            寄測試信給我（{appUser?.email}）
-          </Button>
-          <p className="mt-3 text-xs text-slate-400">
-            已填寫的每個語言版本都會各寄一封，方便一次核對三個版本。
+            這一區的按鈕<b className="text-slate-700">永遠不會寄給媒體名單</b>
+            ，與下方的正式發送完全獨立。
           </p>
 
-          <div className="mt-5 rounded-lg border border-amber-200 bg-amber-50 p-4">
-            <p className="mb-3 text-sm font-medium text-amber-900">
-              想做完整的發送演練？
-            </p>
-            <p className="mb-3 text-xs text-amber-800">
-              勾選「測試名單」後用下方的正式發送，流程與真實發稿完全相同，
-              但只會寄給名單裡的內部同仁。
-            </p>
-            <button
-              onClick={() => setSelected(['test'])}
-              className="rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-900 transition hover:bg-amber-100"
-            >
-              只勾選測試名單（{testListCount} 位）
-            </button>
+          <div className="space-y-3">
+            <div className="rounded-lg border border-slate-200 p-4">
+              <div className="mb-1 text-sm font-medium text-slate-800">
+                寄給我自己
+              </div>
+              <p className="mb-3 text-xs text-slate-500">
+                已填寫的每個語言版本各寄一封到 {appUser?.email}，方便一次核對三個版本。
+              </p>
+              <Button
+                onClick={() => run('self')}
+                disabled={busy || !press || missingVersions.length > 0}
+              >
+                <TestTube2 className="size-4" />
+                寄測試信給我
+              </Button>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 p-4">
+              <div className="mb-1 text-sm font-medium text-slate-800">
+                寄給測試名單
+              </div>
+              <p className="mb-3 text-xs text-slate-500">
+                完整演練：流程與真實發稿相同，但只寄給「測試名單」裡的{' '}
+                {testListCount} 位內部同仁。
+              </p>
+              <Button
+                onClick={() => run('testList')}
+                disabled={
+                  busy || !press || testListCount === 0 || missingVersions.length > 0
+                }
+              >
+                <TestTube2 className="size-4" />
+                寄測試信給測試名單（{testListCount} 位）
+              </Button>
+              {testListCount === 0 && (
+                <p className="mt-2 text-xs text-amber-700">
+                  測試名單還沒有人，請先到「媒體名單」把同仁加進「測試名單」。
+                </p>
+              )}
+            </div>
           </div>
         </Card>
 
         <Card step="3" title="正式發送">
+          <div className="mb-4 flex gap-2 rounded-lg bg-red-50 p-3 text-sm text-red-800">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+            <span>以下按鈕會真的寄給媒體記者，送出後無法收回。</span>
+          </div>
           <div className="grid grid-cols-2 gap-3">
-            {LISTS.map((l) => {
+            {/* 測試名單不出現在這裡，只能由上方的測試按鈕觸發 */}
+            {LISTS.filter((l) => !INTERNAL_LISTS.includes(l)).map((l) => {
               const count = contacts.filter(
                 (c) => c.active !== false && (c.lists ?? []).includes(l),
               ).length
@@ -342,7 +370,7 @@ export default function SendPage() {
         footer={
           <>
             <Button onClick={() => setConfirmOpen(false)}>取消</Button>
-            <Button variant="danger" onClick={() => run(false)} disabled={busy}>
+            <Button variant="danger" onClick={() => run('real')} disabled={busy}>
               {busy ? '發送中…' : '確認發送'}
             </Button>
           </>

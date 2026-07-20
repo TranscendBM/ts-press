@@ -9,6 +9,7 @@ import {
   Users,
 } from 'lucide-react'
 import { useAuth } from '../lib/AuthContext'
+import { useBranding } from '../lib/useBranding'
 import { ROLE_LABELS } from '../constants'
 
 const NAV = [
@@ -21,11 +22,22 @@ const NAV = [
 
 export default function Layout() {
   const { appUser, logout, isAdmin } = useAuth()
+  const { uiLogoUrl } = useBranding()
 
   return (
     <div className="flex min-h-screen">
       <aside className="flex w-60 shrink-0 flex-col border-r border-slate-200 bg-white">
         <div className="border-b border-slate-200 px-5 py-5">
+          {uiLogoUrl && (
+            <img
+              src={uiLogoUrl}
+              alt="Transcend"
+              className="mb-3 h-6 w-auto"
+              onError={(e) => {
+                e.currentTarget.style.display = 'none'
+              }}
+            />
+          )}
           <div className="text-base font-semibold text-slate-900">
             新聞稿發送系統
           </div>

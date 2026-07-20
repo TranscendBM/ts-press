@@ -1,9 +1,11 @@
 import { useState } from 'react'
 import { Mail, ShieldAlert } from 'lucide-react'
 import { useAuth } from '../lib/AuthContext'
+import { useBranding } from '../lib/useBranding'
 
 export default function LoginPage() {
   const { signIn, denial } = useAuth()
+  const { uiLogoUrl } = useBranding()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -26,9 +28,20 @@ export default function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-linear-to-br from-slate-100 to-brand-50 p-6">
       <div className="w-full max-w-md rounded-2xl bg-white p-10 shadow-xl shadow-slate-200/60">
         <div className="mb-8 flex flex-col items-center text-center">
-          <div className="mb-4 flex size-14 items-center justify-center rounded-xl bg-brand-500 text-white">
-            <Mail className="size-7" />
-          </div>
+          {uiLogoUrl ? (
+            <img
+              src={uiLogoUrl}
+              alt="Transcend"
+              className="mb-5 h-9 w-auto"
+              onError={(e) => {
+                e.currentTarget.style.display = 'none'
+              }}
+            />
+          ) : (
+            <div className="mb-4 flex size-14 items-center justify-center rounded-xl bg-brand-500 text-white">
+              <Mail className="size-7" />
+            </div>
+          )}
           <h1 className="text-2xl font-semibold text-slate-900">
             新聞稿發送系統
           </h1>
