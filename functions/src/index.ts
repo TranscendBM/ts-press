@@ -10,6 +10,8 @@ import * as functionsV1 from 'firebase-functions/v1'
 import * as logger from 'firebase-functions/logger'
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager'
 import nodemailer from 'nodemailer'
+import * as tls from 'node:tls'
+import { SECTIGO_INTERMEDIATE_CA } from './smtpCa'
 import { renderEmailHtml, renderEmailText } from './emailTemplate'
 
 initializeApp()
@@ -104,6 +106,12 @@ async function createTransport(settings: SmtpSettings, password: string) {
     // 沒有 TLS 的話 AUTH LOGIN 的帳密等同明文傳送
     requireTLS: settings.port !== 465,
     auth: { user: settings.user, pass: password },
+    tls: {
+      servername: settings.host,
+      // 伺服器沒送中介憑證，補上後才拼得出信任鏈。
+      // 維持完整驗證，不用 rejectUnauthorized:false —— 那會讓帳密暴露在中間人攻擊下。
+      ca: [...tls.rootCertificates, SECTIGO_INTERMEDIATE_CA],
+    },
     // 連線重複使用，避免每封信都重新握手被伺服器當成異常流量
     pool: true,
     maxConnections: 1,
