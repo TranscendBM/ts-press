@@ -12,6 +12,7 @@ import { db } from '../lib/firebase'
 import { useAuth } from '../lib/AuthContext'
 import PageHeader from '../components/PageHeader'
 import { Badge, Button, Field, Modal, Select, TextInput } from '../components/ui'
+import SmtpSettingsCard from '../components/SmtpSettingsCard'
 import { ROLES, ROLE_LABELS, type Role } from '../constants'
 import type { AppUser } from '../types'
 
@@ -88,8 +89,8 @@ export default function SettingsPage() {
   return (
     <>
       <PageHeader
-        title="使用者管理"
-        description="只有名單內的 Google 帳號可以登入。管理員與主管可以按下正式發送。"
+        title="系統設定"
+        description="寄信伺服器與使用者權限。只有管理員看得到這一頁。"
         actions={
           <Button variant="primary" onClick={() => setOpen(true)}>
             <Plus className="size-4" />
@@ -98,8 +99,13 @@ export default function SettingsPage() {
         }
       />
 
-      <div className="p-8">
+      <div className="space-y-6 p-8">
+        <SmtpSettingsCard />
+
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+          <div className="border-b border-slate-200 px-4 py-3">
+            <h2 className="text-sm font-semibold text-slate-800">使用者</h2>
+          </div>
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs text-slate-500">
               <tr>

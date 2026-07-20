@@ -89,21 +89,34 @@ Firestore → 建立集合 `users` → 文件 ID 填**你登入用的那個 Goog
 在公司內網 debug 時要記得這件事，內網查到的私有位址不代表外部連不到。
 網域的 SPF 已涵蓋這台主機（`ip4:59.124.102.34/27`），寄出的信會通過 SPF 驗證。
 
-### 5. 設定密鑰
+### 5. 填寫寄信設定
 
-```bash
-npx firebase functions:secrets:set SMTP_HOST      # email.transcend-info.com
-npx firebase functions:secrets:set SMTP_PORT      # 587
-npx firebase functions:secrets:set SMTP_USER      # elvis_cheng@transcend-info.com
-npx firebase functions:secrets:set SMTP_PASS      # 該帳號的密碼
-npx firebase functions:secrets:set SMTP_REPLY_TO  # press_center@transcend-info.com
-```
+部署完成後，用管理員帳號登入 → **系統設定 → 寄信設定**，填入：
 
-> **一定要用 port 587，不能用 25。** Google Cloud 封鎖所有對外部 IP 的 port 25 連線，
-> Cloud Functions 也適用。mail2000 的 587 支援 `AUTH LOGIN` + `STARTTLS`，程式會強制加密連線。
+| 欄位 | 值 |
+|---|---|
+| SMTP 主機 | `email.transcend-info.com` |
+| 連接埠 | `587` |
+| 寄件帳號 | 可登入的個人帳號，例如 `elvis_cheng@transcend-info.com` |
+| 回覆至 | `press_center@transcend-info.com` |
+| 密碼 | 該帳號的密碼 |
 
-> `press_center@` 是群組信箱、不是可登入的帳號，所以認證與寄件地址都用個人帳號，
-> 再把 `Reply-To` 指向群組信箱，記者回信全組都看得到。
+儲存後按「測試連線並寄信給我」驗證。密碼日後過期，回同一個畫面更新即可，不需要重新部署。
+
+**設計說明**：
+
+- 主機／埠／帳號／Reply-To 存在 Firestore `settings/smtp`（僅 admin 可讀，只能由 function 寫入）。
+- **密碼只寫進 Google Secret Manager**，不進 Firestore，也不會回傳前端。程式在執行期讀取
+  `latest` 版本，所以更新後立即生效。
+- **一定要用 port 587，不能用 25。** Google Cloud 封鎖所有對外部 IP 的 port 25 連線。
+  mail2000 的 587 支援 `AUTH LOGIN` + `STARTTLS`，程式強制加密（`requireTLS`），
+  否則 `AUTH LOGIN` 的帳密等同明文傳送。
+- `press_center@` 是群組信箱、不是可登入的帳號，所以認證與寄件地址都用個人帳號，
+  再把 `Reply-To` 指向群組信箱，記者回信全組都看得到。
+
+> 若儲存密碼時出現「Secret Manager 失敗」，代表 Cloud Functions 的執行服務帳號
+> 缺少 `roles/secretmanager.admin`。到 Google Cloud Console → IAM，找到
+> `<專案編號>-compute@developer.gserviceaccount.com` 補上該角色即可。
 
 > 密碼只存在 Google Secret Manager，不會進版控。發送前程式會先 `verify()` 連線，
 > 連不上會直接回報錯誤而不會送出半套。

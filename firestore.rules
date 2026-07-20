@@ -26,6 +26,13 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    // 寄信設定：只放非機密欄位（主機／埠／帳號／Reply-To），
+    // 密碼存在 Secret Manager。寫入一律經 updateSmtpSettings function。
+    match /settings/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
     // 媒體名單：白名單使用者皆可維護
     match /mediaContacts/{id} {
       allow read, write: if isWhitelisted();

@@ -52,7 +52,7 @@ export default function Layout() {
               }
             >
               <Settings className="size-4.5" />
-              使用者管理
+              系統設定
             </NavLink>
           )}
         </nav>
