@@ -88,8 +88,13 @@ const COPY = {
   },
 } as const
 
+/**
+ * 繁體中文版一律優先套用微軟正黑體。
+ * 字型名稱同時列出英文與中文 —— 部分系統（尤其中文版 Windows 與
+ * 舊版 Outlook）只認得其中一種寫法，兩個都寫才不會退回預設字型。
+ */
 const FONT_TW =
-  "'Helvetica Neue',Helvetica,Arial,'Microsoft JhengHei','Noto Sans TC',sans-serif"
+  "'Microsoft JhengHei',微軟正黑體,'PingFang TC','Helvetica Neue',Helvetica,Arial,sans-serif"
 const FONT_EN = "'Helvetica Neue',Helvetica,Arial,sans-serif"
 
 /** 後台「關於創見」欄位留空時使用的預設文字，也用來預先填入編輯欄位。 */

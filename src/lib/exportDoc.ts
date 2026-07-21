@@ -45,8 +45,14 @@ const BRAND_HEX = BRAND_COLOR.replace('#', '')
  */
 const DOC_LOGO = new URL('/logo-dark.png', window.location.origin).href
 
-/** logo 與頁首底線之間的距離。0.3cm ÷ 2.54 × 72 ≒ 8.5 點。 */
-const BORDER_SPACE_PT = 9
+/**
+ * logo 與頁首底線之間的距離（點）。
+ *
+ * 光靠 w:space 不夠 —— OOXML 的框線間距是從「文字基線」量起，
+ * 內嵌圖片會超出基線之下，視覺上仍會貼著線。因此另外在 logo 之後
+ * 插入一個換行，用一整行的高度把兩者錯開。
+ */
+const BORDER_SPACE_PT = 12
 
 /**
  * 頁首額外增加的高度（0.5cm）。
@@ -300,6 +306,9 @@ export async function downloadWord(input: TemplateInput, filename: string) {
           size: 18,
           font: FONTS,
         }),
+        // 空白的一行：logo 與「新聞稿」仍在同一行，但底下多空一行，
+        // 圖片才不會黏著紅線。docx 是用 break 選項在此 run 之前插入換行。
+        new TextRun({ text: '', break: 1, size: 18, font: FONTS }),
       ],
     }),
   ]
