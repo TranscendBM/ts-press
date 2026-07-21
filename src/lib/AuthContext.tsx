@@ -12,10 +12,16 @@ import {
   signOut,
   type User,
 } from 'firebase/auth'
-import { doc, getDoc } from 'firebase/firestore'
+import { doc, getDoc, onSnapshot } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { auth, db, functions, googleProvider } from './firebase'
 import type { AppUser } from '../types'
+import {
+  hasPermission,
+  normalizeRole,
+  type Permission,
+  type RolePermissions,
+} from '../../shared/permissions'
 
 /**
  * 登入被拒的原因。任何 Google 帳號都能按登入，
@@ -50,7 +56,8 @@ interface AuthState {
   denial: AuthDenial
   signIn: () => Promise<void>
   logout: () => Promise<void>
-  canSend: boolean
+  /** 依權限矩陣判斷。前端只用來顯示，實際攔截在 Cloud Functions。 */
+  can: (permission: Permission) => boolean
   isAdmin: boolean
 }
 
@@ -61,6 +68,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [appUser, setAppUser] = useState<AppUser | null>(null)
   const [loading, setLoading] = useState(true)
   const [denial, setDenial] = useState<AuthDenial>(null)
+  // 管理員可在後台覆寫各角色權限，讀不到就沿用預設
+  const [permissionOverrides, setPermissionOverrides] = useState<
+    Record<string, Partial<RolePermissions>> | undefined
+  >(undefined)
+
+  useEffect(() => {
+    if (!appUser) return
+    return onSnapshot(
+      doc(db, 'settings', 'permissions'),
+      (snap) => setPermissionOverrides(snap.data()?.roles),
+      () => setPermissionOverrides(undefined),
+    )
+  }, [appUser])
 
   useEffect(() => {
     return onAuthStateChanged(auth, async (user) => {
@@ -123,11 +143,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         await signOut(auth)
         setDenial(null)
       },
-      // 只有 admin 與 manager 能按下正式發送
-      canSend: appUser?.role === 'admin' || appUser?.role === 'manager',
-      isAdmin: appUser?.role === 'admin',
+      can: (permission: Permission) =>
+        hasPermission(appUser?.role, permission, permissionOverrides),
+      isAdmin: normalizeRole(appUser?.role) === 'admin',
     }),
-    [firebaseUser, appUser, loading, denial],
+    [firebaseUser, appUser, loading, denial, permissionOverrides],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

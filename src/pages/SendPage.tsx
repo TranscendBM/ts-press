@@ -30,7 +30,9 @@ const sendCampaign = httpsCallable<
 export default function SendPage() {
   const [params] = useSearchParams()
   const navigate = useNavigate()
-  const { appUser, canSend } = useAuth()
+  const { appUser, can } = useAuth()
+  const canSendTest = can('sendTest')
+  const canSend = can('sendReal')
 
   const [presses, setPresses] = useState<PressRelease[]>([])
   const [contacts, setContacts] = useState<MediaContact[]>([])
@@ -227,6 +229,11 @@ export default function SendPage() {
             這一區的按鈕<b className="text-slate-700">永遠不會寄給媒體名單</b>
             ，與下方的正式發送完全獨立。
           </p>
+          {!canSendTest && (
+            <div className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+              你的角色沒有發送權限，包含測試信。可以編輯稿件與下載檔案。
+            </div>
+          )}
 
           <div className="space-y-3">
             <div className="rounded-lg border border-slate-200 p-4">
@@ -238,7 +245,9 @@ export default function SendPage() {
               </p>
               <Button
                 onClick={() => run('self')}
-                disabled={busy || !press || missingVersions.length > 0}
+                disabled={
+                  busy || !press || !canSendTest || missingVersions.length > 0
+                }
               >
                 <TestTube2 className="size-4" />
                 寄測試信給我
@@ -256,7 +265,11 @@ export default function SendPage() {
               <Button
                 onClick={() => run('testList')}
                 disabled={
-                  busy || !press || testListCount === 0 || missingVersions.length > 0
+                  busy ||
+                  !press ||
+                  !canSendTest ||
+                  testListCount === 0 ||
+                  missingVersions.length > 0
                 }
               >
                 <TestTube2 className="size-4" />

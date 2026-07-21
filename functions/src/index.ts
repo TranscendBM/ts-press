@@ -18,6 +18,12 @@ import {
   type PressContact,
 } from './emailTemplate.generated'
 import {
+  hasPermission,
+  normalizeRole,
+  type Permission,
+  type RolePermissions,
+} from './permissions.generated'
+import {
   ATTACHMENT_LIMITS,
   BATCH_SIZE,
   chunk,
@@ -207,10 +213,45 @@ async function authorize(
   return { ...(snap?.data() ?? {}), email: email as string } as AuthorizedUser
 }
 
+/** 後台可覆寫的權限矩陣。讀不到就退回預設值。 */
+async function readPermissionOverrides(): Promise<
+  Record<string, Partial<RolePermissions>> | undefined
+> {
+  try {
+    const snap = await db.doc('settings/permissions').get()
+    return snap.exists
+      ? (snap.data()?.roles as Record<string, Partial<RolePermissions>>)
+      : undefined
+  } catch (err) {
+    // 讀不到設定時採用預設權限，寧可嚴格也不要放行
+    logger.warn('讀取權限設定失敗，改用預設值', err)
+    return undefined
+  }
+}
+
+/**
+ * 依權限矩陣把關。前端會隱藏沒有權限的按鈕，
+ * 但真正的攔截一定要在這裡 —— 前端可被繞過。
+ */
+async function requirePermission(
+  auth: CallableAuth,
+  permission: Permission,
+): Promise<AuthorizedUser> {
+  const user = await authorize(auth, false)
+  const overrides = await readPermissionOverrides()
+  if (!hasPermission(user.role, permission, overrides)) {
+    throw new HttpsError(
+      'permission-denied',
+      `你的角色沒有「${permission}」權限。`,
+    )
+  }
+  return user
+}
+
 /** 只有 admin 能修改系統設定。 */
 async function requireAdmin(auth: CallableAuth): Promise<AuthorizedUser> {
   const user = await authorize(auth, false)
-  if (user.role !== 'admin') {
+  if (normalizeRole(user.role) !== 'admin') {
     throw new HttpsError('permission-denied', '只有管理員可以執行這個動作。')
   }
   return user
@@ -317,8 +358,11 @@ export const sendCampaign = onCall<SendRequest>(
     }
     const isTest = mode !== 'real'
 
-    // 只有正式發送需要 admin / manager 權限
-    const user = await authorize(request.auth, mode === 'real')
+    // 測試信與正式發送是兩種不同權限：行銷專員兩者皆無
+    const user = await requirePermission(
+      request.auth,
+      mode === 'real' ? 'sendReal' : 'sendTest',
+    )
 
     const pressSnap = await db
       .collection('pressReleases')
@@ -730,7 +774,7 @@ export const syncUserClaims = onDocumentWritten(
     const email = event.params.email.toLowerCase()
     const after = event.data?.after?.data()
     // 與 evaluateAccess 一致：必須明確 active === true 才算啟用
-    await applyClaim(email, after?.active === true, after?.role)
+    await applyClaim(email, after?.active === true, normalizeRole(after?.role))
   },
 )
 
@@ -746,7 +790,7 @@ export const onUserCreated = functionsV1
     const email = (user.email ?? '').toLowerCase()
     if (!email) return
     const data = snap_or_undefined(await db.collection('users').doc(email).get())
-    await applyClaim(email, data?.active === true, data?.role)
+    await applyClaim(email, data?.active === true, normalizeRole(data?.role))
   })
 
 /**
@@ -808,6 +852,6 @@ export const deleteMediaEvent = onCall<{ eventId: string }>(
  */
 export const refreshMyClaims = onCall(async (request) => {
   const user = await authorize(request.auth, false)
-  await applyClaim(user.email, true, user.role)
+  await applyClaim(user.email, true, normalizeRole(user.role))
   return { ok: true, role: user.role ?? null }
 })

@@ -13,9 +13,16 @@ import { useAuth } from '../lib/AuthContext'
 import PageHeader from '../components/PageHeader'
 import { Badge, Button, Field, Modal, Select, TextInput } from '../components/ui'
 import SmtpSettingsCard from '../components/SmtpSettingsCard'
+import RolePermissionsCard from '../components/RolePermissionsCard'
 import PressContactsCard from '../components/PressContactsCard'
-import { ROLES, ROLE_LABELS, type Role } from '../constants'
+import { ROLES, ROLE_LABELS, normalizeRole, type Role } from '../constants'
+import { hasPermission } from '../../shared/permissions'
 import type { AppUser } from '../types'
+
+/** 名單頁只是顯示用，真正的判斷在 Cloud Functions。 */
+function canSendReal(role: string | undefined) {
+  return hasPermission(role, 'sendReal')
+}
 
 export default function SettingsPage() {
   const { appUser, isAdmin } = useAuth()
@@ -24,7 +31,7 @@ export default function SettingsPage() {
   const [draft, setDraft] = useState({
     email: '',
     displayName: '',
-    role: 'editor' as Role,
+    role: 'specialist' as Role,
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -64,7 +71,7 @@ export default function SettingsPage() {
         { merge: true },
       )
       setOpen(false)
-      setDraft({ email: '', displayName: '', role: 'editor' })
+      setDraft({ email: '', displayName: '', role: 'specialist' })
     } finally {
       setSaving(false)
     }
@@ -114,6 +121,7 @@ export default function SettingsPage() {
       />
 
       <div className="space-y-6 p-8">
+        <RolePermissionsCard />
         <PressContactsCard />
         <SmtpSettingsCard />
 
@@ -146,7 +154,7 @@ export default function SettingsPage() {
                   <td className="px-4 py-3 text-slate-600">{u.email}</td>
                   <td className="px-4 py-3">
                     <Select
-                      value={u.role}
+                      value={normalizeRole(u.role) ?? 'specialist'}
                       onChange={(e) => changeRole(u, e.target.value as Role)}
                       disabled={isSelf(u)}
                       title={isSelf(u) ? '不能變更自己的角色' : undefined}
@@ -160,10 +168,10 @@ export default function SettingsPage() {
                     </Select>
                   </td>
                   <td className="px-4 py-3">
-                    {u.role === 'editor' ? (
-                      <span className="text-slate-400">否</span>
-                    ) : (
+                    {canSendReal(u.role) ? (
                       <Badge tone="green">是</Badge>
+                    ) : (
+                      <span className="text-slate-400">否</span>
                     )}
                   </td>
                   <td className="px-4 py-3">

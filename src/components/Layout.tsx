@@ -10,18 +10,28 @@ import {
 } from 'lucide-react'
 import { useAuth } from '../lib/AuthContext'
 import { useBranding } from '../lib/useBranding'
-import { ROLE_LABELS } from '../constants'
+import { ROLE_LABELS, normalizeRole, type Permission } from '../constants'
 
 const NAV = [
-  { to: '/press', label: '新聞稿', icon: FileText },
-  { to: '/contacts', label: '媒體名單', icon: Users },
-  { to: '/send', label: '發送', icon: Send },
-  { to: '/campaigns', label: '發送紀錄', icon: BarChart3 },
-  { to: '/events', label: '媒體關係', icon: HeartHandshake },
-]
+  { to: '/press', label: '新聞稿', icon: FileText, need: 'viewPress' },
+  { to: '/contacts', label: '媒體名單', icon: Users, need: 'manageContacts' },
+  {
+    to: '/events',
+    label: '媒體關係',
+    icon: HeartHandshake,
+    need: 'manageEvents',
+  },
+  { to: '/send', label: '發送', icon: Send, need: 'sendTest' },
+  {
+    to: '/campaigns',
+    label: '發送紀錄',
+    icon: BarChart3,
+    need: 'viewCampaigns',
+  },
+] as const satisfies readonly { need: Permission; [k: string]: unknown }[]
 
 export default function Layout() {
-  const { appUser, logout, isAdmin } = useAuth()
+  const { appUser, logout, isAdmin, can } = useAuth()
   const { uiLogoUrl } = useBranding()
 
   return (
@@ -45,7 +55,7 @@ export default function Layout() {
         </div>
 
         <nav className="flex-1 space-y-1 p-3">
-          {NAV.map(({ to, label, icon: Icon }) => (
+          {NAV.filter((item) => can(item.need)).map(({ to, label, icon: Icon }) => (
             <NavLink
               key={to}
               to={to}
@@ -83,7 +93,7 @@ export default function Layout() {
             {appUser?.displayName || appUser?.email}
           </div>
           <div className="mt-0.5 text-xs text-slate-400">
-            {appUser ? ROLE_LABELS[appUser.role] : ''}
+            {appUser?.role ? (ROLE_LABELS[normalizeRole(appUser.role)!] ?? '') : ''}
           </div>
           <button
             onClick={logout}

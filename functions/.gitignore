@@ -4,3 +4,4 @@ lib/
 .env
 src/emailTemplate.generated.ts
 src/policy.generated.ts
+src/permissions.generated.ts

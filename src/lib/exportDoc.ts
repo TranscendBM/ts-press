@@ -13,11 +13,16 @@ import {
 import {
   BRAND_COLOR,
   DEFAULT_ABOUT,
-  DEFAULT_EMAIL_LOGO,
+  escapeHtml,
   formatReleaseDate,
-  renderEmailHtml,
+  safeUrl,
   type TemplateInput,
 } from '../../shared/emailTemplate'
+import {
+  readImageInfo,
+  scaleToWidth,
+  type ImageInfo,
+} from '../../shared/imageSize'
 
 /**
  * 新聞稿的下載功能。
@@ -30,6 +35,12 @@ import {
  */
 
 const BRAND_HEX = BRAND_COLOR.replace('#', '')
+
+/**
+ * Word / PDF 用的深色（紅色）logo。
+ * 信件是紅底所以用白色版，但文件是白底，必須換成紅色版才看得見。
+ */
+const DOC_LOGO = new URL('/logo-dark.png', window.location.origin).href
 
 /**
  * 中文用微軟正黑體、英文用 Arial。
@@ -51,20 +62,25 @@ function saveBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(a.href)
 }
 
-/** 抓內文圖片並取得尺寸。跨網域被擋時回傳 null，不影響其他內容。 */
-async function loadImage(
-  url: string,
-): Promise<{ data: ArrayBuffer; width: number; height: number } | null> {
+interface LoadedImage {
+  data: ArrayBuffer
+  info: ImageInfo
+}
+
+/**
+ * 抓圖片並解析尺寸。
+ *
+ * 尺寸完全從檔頭位元組解析，不用 createImageBitmap / img.decode() ——
+ * 那兩者在部分瀏覽器會靜默失敗或永不 resolve，前者讓 Word 少掉所有圖片、
+ * 後者直接讓匯出整個卡住。另加逾時保護，網路異常時最多略過圖片而非中斷。
+ */
+async function loadImage(url: string): Promise<LoadedImage | null> {
   try {
-    const res = await fetch(url)
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) })
     if (!res.ok) return null
     const data = await res.arrayBuffer()
-    const bitmap = await createImageBitmap(new Blob([data]))
-    // 統一縮到 260px 寬，與信件版面一致
-    const width = 260
-    const height = Math.round((bitmap.height / bitmap.width) * width)
-    bitmap.close()
-    return { data, width, height }
+    const info = readImageInfo(data)
+    return info ? { data, info } : null
   } catch {
     return null
   }
@@ -155,9 +171,9 @@ export async function downloadWord(input: TemplateInput, filename: string) {
           spacing: { before: 120, after: 320 },
           children: [
             new ImageRun({
-              type: 'png',
+              type: image.info.format,
               data: image.data,
-              transformation: { width: image.width, height: image.height },
+              transformation: scaleToWidth(image.info, 260),
             }),
           ],
         }),
@@ -231,26 +247,30 @@ export async function downloadWord(input: TemplateInput, filename: string) {
     }),
   )
 
-  // 頁首：品牌色底 + 白色 logo，重現信件的視覺
-  const logo = await loadImage(input.logoUrl?.trim() || DEFAULT_EMAIL_LOGO)
+  // 頁首：白底 + 紅色 logo。
+  // 不用品牌色底 —— 轉存 PDF 時瀏覽器預設不列印背景色，
+  // 白色 logo 會直接融進白底而看不見。紅色 logo 配白底則兩者都正常。
+  const logo = await loadImage(DOC_LOGO)
   const headerChildren = [
     new Paragraph({
-      shading: { fill: BRAND_HEX },
-      spacing: { before: 60, after: 60 },
+      spacing: { before: 40, after: 80 },
+      border: {
+        bottom: { style: BorderStyle.SINGLE, size: 12, color: BRAND_HEX },
+      },
       children: logo
         ? [
             new ImageRun({
-              type: 'png',
+              type: logo.info.format,
               data: logo.data,
-              transformation: { width: 130, height: 15 },
+              transformation: scaleToWidth(logo.info, 120),
             }),
           ]
         : [
             new TextRun({
               text: 'TRANSCEND',
               bold: true,
-              color: 'FFFFFF',
-              size: 22,
+              color: BRAND_HEX,
+              size: 24,
               font: FONTS,
             }),
           ],
@@ -270,12 +290,14 @@ export async function downloadWord(input: TemplateInput, filename: string) {
           default: new Footer({
             children: [
               new Paragraph({
-                shading: { fill: BRAND_HEX },
-                spacing: { before: 60, after: 60 },
+                spacing: { before: 80 },
+                border: {
+                  top: { style: BorderStyle.SINGLE, size: 6, color: BRAND_HEX },
+                },
                 children: [
                   new TextRun({
                     text: '© Transcend Information, Inc. All Rights Reserved.',
-                    color: 'FFFFFF',
+                    color: '8A919E',
                     size: 15,
                     font: FONTS,
                   }),
@@ -292,29 +314,100 @@ export async function downloadWord(input: TemplateInput, filename: string) {
   saveBlob(await Packer.toBlob(doc), `${filename}.docx`)
 }
 
+/**
+ * PDF 走瀏覽器列印。刻意不重用信件樣板 ——
+ * 信件是紅底白 logo，而瀏覽器列印預設不輸出背景色，
+ * logo 會融進白底消失。這裡改用與 Word 一致的白底紅 logo 版面。
+ */
 export function downloadPdf(input: TemplateInput, filename: string) {
-  const html = renderEmailHtml({ ...input, recipientName: '' })
   const win = window.open('', '_blank')
   if (!win) {
     alert('瀏覽器阻擋了彈出視窗，請允許後再試一次。')
     return
   }
-  win.document.write(
-    html.replace(
-      '</head>',
-      `<style>
-         @page { margin: 15mm; }
-         @media print { body { background: #fff !important; } }
-       </style>
-       <script>
-         document.title = ${JSON.stringify(filename)};
-         window.addEventListener('load', function () {
-           // 等圖片載完再列印，否則 PDF 會缺圖
-           setTimeout(function () { window.print(); }, 400);
-         });
-       </script>
-       </head>`,
-    ),
-  )
+
+  const font =
+    input.language === 'tw'
+      ? "'Helvetica Neue',Helvetica,Arial,'Microsoft JhengHei','Noto Sans TC',sans-serif"
+      : "'Helvetica Neue',Helvetica,Arial,sans-serif"
+
+  const blocks = input.bodyText
+    .replace(/\r\n/g, '\n')
+    .split(/\n{2,}/)
+    .map((b) => b.trim())
+    .filter(Boolean)
+    .map((b) =>
+      b.startsWith('## ')
+        ? `<h2>${escapeHtml(b.slice(3).trim())}</h2>`
+        : `<p>${escapeHtml(b).replace(/\n/g, '<br>')}</p>`,
+    )
+
+  const heroSrc = safeUrl(input.heroImageUrl)
+  if (heroSrc) {
+    blocks.splice(1, 0, `<p class="pic"><img src="${heroSrc}" alt=""></p>`)
+  }
+
+  const c = input.contact
+  const contactBlock = c?.name
+    ? `<section class="contact">
+         <h3>${input.language === 'tw' ? '新聞聯絡人' : 'Press Contact'}</h3>
+         <p>${escapeHtml([c.name, c.company].filter(Boolean).join(' · '))}</p>
+         ${c.email ? `<p>${escapeHtml(c.email)}</p>` : ''}
+         ${c.phone ? `<p>${escapeHtml(c.phone)}</p>` : ''}
+       </section>`
+    : ''
+
+  const about = input.about?.trim() || DEFAULT_ABOUT[input.language].text
+  const aboutLink = input.aboutLink?.trim() || DEFAULT_ABOUT[input.language].link
+  const dateLine = formatReleaseDate(input.releaseDate, input.language)
+
+  win.document.write(`<!doctype html>
+<html lang="${input.language === 'tw' ? 'zh-Hant' : 'en'}">
+<head>
+<meta charset="utf-8">
+<title>${escapeHtml(filename)}</title>
+<style>
+  @page { margin: 16mm; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: ${font}; color: #2b2f36; font-size: 11pt; line-height: 1.75; }
+  header { display: flex; align-items: center; justify-content: space-between;
+           border-bottom: 2px solid ${BRAND_COLOR}; padding-bottom: 10px; margin-bottom: 24px; }
+  header img { height: 26px; width: auto; }
+  header span { font-size: 9pt; color: #8a919e; }
+  h1 { font-size: 18pt; line-height: 1.4; color: #12161c; margin: 0 0 6px; }
+  .date { font-size: 9pt; color: #8a919e; margin: 0 0 22px; }
+  h2 { font-size: 12pt; color: ${BRAND_COLOR}; margin: 22px 0 8px; }
+  p { margin: 0 0 12px; }
+  .pic { text-align: center; margin: 16px 0 20px; }
+  .pic img { max-width: 280px; height: auto; }
+  .contact { margin-top: 28px; padding-top: 14px; border-top: 1px solid #e6e8ec; }
+  .contact h3 { font-size: 10pt; color: ${BRAND_COLOR}; margin: 0 0 6px; }
+  .contact p { margin: 0; font-size: 10pt; color: #4a505c; }
+  footer { margin-top: 28px; padding-top: 10px; border-top: 1px solid ${BRAND_COLOR};
+           font-size: 8.5pt; color: #8a919e; }
+  footer p { margin: 0 0 3px; }
+</style>
+<script>
+  window.addEventListener('load', function () {
+    // 等圖片載完再列印，否則 PDF 會缺圖
+    setTimeout(function () { window.print() }, 500)
+  })
+</script>
+</head>
+<body>
+  <header>
+    <img src="${DOC_LOGO}" alt="TRANSCEND">
+    <span>${input.language === 'tw' ? '新聞稿' : 'Press Release'}</span>
+  </header>
+  <h1>${escapeHtml(input.subject)}</h1>
+  ${dateLine ? `<p class="date">${escapeHtml(dateLine)}</p>` : ''}
+  ${blocks.join('')}
+  ${contactBlock}
+  <footer>
+    <p>${escapeHtml(input.language === 'tw' ? '關於創見資訊' : 'About Transcend')}：${escapeHtml(about)} ${escapeHtml(aboutLink)}</p>
+    <p>&copy; Transcend Information, Inc. All Rights Reserved.</p>
+  </footer>
+</body>
+</html>`)
   win.document.close()
 }

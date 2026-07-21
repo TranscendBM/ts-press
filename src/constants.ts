@@ -191,15 +191,17 @@ export function isGiftType(type: string | undefined): boolean {
   return GIFT_TYPES.includes(normalizeEventType(type))
 }
 
-/** 使用者角色。admin 與 manager 可按下正式發送。 */
-export const ROLES = ['admin', 'manager', 'editor'] as const
-export type Role = (typeof ROLES)[number]
-
-export const ROLE_LABELS: Record<Role, string> = {
-  admin: '管理員',
-  manager: '主管',
-  editor: '編輯',
-}
+// 角色與權限統一由 shared/permissions 定義，這裡轉出方便既有引用
+export {
+  ROLES,
+  ROLE_LABELS,
+  ROLE_DESCRIPTIONS,
+  PERMISSIONS,
+  PERMISSION_LABELS,
+  normalizeRole,
+  type Role,
+  type Permission,
+} from '../shared/permissions'
 
 /**
  * 記者按「回信」時會進的信箱。實際寄件帳號設定在 Cloud Functions 的

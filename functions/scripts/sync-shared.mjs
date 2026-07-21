@@ -17,6 +17,7 @@ const outDir = join(here, '..', 'src')
 const FILES = [
   ['emailTemplate.ts', 'emailTemplate.generated.ts'],
   ['policy.ts', 'policy.generated.ts'],
+  ['permissions.ts', 'permissions.generated.ts'],
 ]
 
 mkdirSync(outDir, { recursive: true })
