@@ -117,7 +117,7 @@ export default function SettingsPage() {
         <PressContactsCard />
         <SmtpSettingsCard />
 
-        <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
           <div className="border-b border-slate-200 px-4 py-3">
             <h2 className="text-sm font-semibold text-slate-800">使用者</h2>
           </div>

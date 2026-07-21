@@ -55,7 +55,7 @@ export default function CampaignsPage() {
             description="發送新聞稿之後，這裡會顯示每一次的成效。"
           />
         ) : (
-          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+          <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-left text-xs text-slate-500">
                 <tr>

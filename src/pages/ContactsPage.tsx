@@ -356,7 +356,7 @@ export default function ContactsPage() {
             }
           />
         ) : (
-          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+          <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-left text-xs text-slate-500">
                 <tr>
@@ -428,10 +428,21 @@ export default function ContactsPage() {
                         <span className="text-slate-300">—</span>
                       )}
                     </Td>
-                    <Td className="text-slate-700">
-                      {c.name || (
-                        <span className="text-slate-400">（未填姓名）</span>
-                      )}
+                    <Td
+                      className="text-slate-700"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        openEdit(c)
+                      }}
+                    >
+                      <span
+                        className="cursor-text rounded px-1.5 py-1 -mx-1.5 transition hover:bg-brand-50 hover:text-brand-700"
+                        title="點擊編輯這位聯絡人"
+                      >
+                        {c.name || (
+                          <span className="text-slate-400">（未填姓名）</span>
+                        )}
+                      </span>
                     </Td>
                     <Td className="text-slate-500">{c.title || '—'}</Td>
 
@@ -914,7 +925,7 @@ function IconBtn({
       className={`rounded-lg p-1.5 transition ${
         danger
           ? 'text-slate-400 hover:bg-red-50 hover:text-red-600'
-          : 'text-slate-400 hover:bg-slate-100 hover:text-slate-700'
+          : 'text-brand-600 hover:bg-brand-50 hover:text-brand-700'
       }`}
     >
       {children}

@@ -147,16 +147,27 @@ export function lookupMediaTier(outlet: string) {
   return hit ? MEDIA_TIER_MAP[hit] : null
 }
 
-/** 媒體關係經營的活動類型。 */
+/**
+ * 媒體關係經營的活動類型。
+ * 'tea'（媒體茶會）已停用，不再出現在新增選單，
+ * 但標籤保留著，否則既有紀錄會顯示不出類型名稱。
+ */
+export type EventType =
+  | 'meal'
+  | 'tea'
+  | 'gift_dragonboat'
+  | 'gift_midautumn'
+  | 'gift_other'
+  | 'other'
+
+/** 建立活動時可選的類型。 */
 export const EVENT_TYPES = [
   'meal',
-  'tea',
   'gift_dragonboat',
   'gift_midautumn',
   'gift_other',
   'other',
-] as const
-export type EventType = (typeof EVENT_TYPES)[number]
+] as const satisfies readonly EventType[]
 
 export const EVENT_TYPE_LABELS: Record<EventType, string> = {
   meal: '媒體餐敘',
