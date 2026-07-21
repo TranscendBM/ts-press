@@ -7,16 +7,27 @@ import {
   onSnapshot,
   serverTimestamp,
   setDoc,
+  updateDoc,
 } from 'firebase/firestore'
-import { ArrowLeft, Download, Search, Star } from 'lucide-react'
+import { ArrowLeft, Download, Pencil, Search, Star } from 'lucide-react'
 import { db } from '../lib/firebase'
 import PageHeader from '../components/PageHeader'
-import { Button, Select, TextInput } from '../components/ui'
 import {
+  Button,
+  Field,
+  Modal,
+  Select,
+  TextArea,
+  TextInput,
+} from '../components/ui'
+import {
+  EVENT_TYPES,
+  EVENT_TYPE_LABELS,
   eventTypeLabel,
   GIFT_TYPES,
   LISTS,
   LIST_LABELS,
+  type EventType,
   type ListId,
 } from '../constants'
 import type { EventParticipant, MediaContact, MediaEvent } from '../types'
@@ -34,6 +45,14 @@ export default function EventDetailPage() {
   // 台灣媒體是主要對象，預設就篩台灣 PR
   const [listFilter, setListFilter] = useState<ListId | 'all'>('tw_pr')
   const [onlyMarked, setOnlyMarked] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
+  const [savingEvent, setSavingEvent] = useState(false)
+  const [form, setForm] = useState({
+    name: '',
+    type: 'meal' as EventType,
+    date: '',
+    note: '',
+  })
 
   useEffect(() => {
     if (!id) return
@@ -82,6 +101,49 @@ export default function EventDetailPage() {
   }, [contacts, listFilter, search, onlyMarked, records])
 
   const markedCount = Object.values(records).filter((r) => r.attended).length
+
+  function openEdit() {
+    if (!event) return
+    setForm({
+      name: event.name,
+      // 舊資料可能存著已移除的類型（例如媒體茶會），下拉沒有對應選項會顯示空白
+      type: EVENT_TYPES.includes(event.type) ? event.type : 'other',
+      date: event.date,
+      note: event.note ?? '',
+    })
+    setEditOpen(true)
+  }
+
+  async function saveEvent() {
+    if (!id || !form.name.trim() || !form.date) return
+    setSavingEvent(true)
+    try {
+      await updateDoc(doc(db, 'mediaEvents', id), {
+        name: form.name.trim(),
+        type: form.type,
+        date: form.date,
+        // year 是由日期推導的欄位，改日期時要一起更新，否則年份篩選會對不上
+        year: Number(form.date.slice(0, 4)),
+        note: form.note.trim(),
+        updatedAt: serverTimestamp(),
+      })
+      setEvent((prev) =>
+        prev
+          ? {
+              ...prev,
+              name: form.name.trim(),
+              type: form.type,
+              date: form.date,
+              year: Number(form.date.slice(0, 4)),
+              note: form.note.trim(),
+            }
+          : prev,
+      )
+      setEditOpen(false)
+    } finally {
+      setSavingEvent(false)
+    }
+  }
 
   async function save(contactId: string, patch: Partial<EventParticipant>) {
     if (!id) return
@@ -139,6 +201,10 @@ export default function EventDetailPage() {
             <Button onClick={() => navigate('/events')}>
               <ArrowLeft className="size-4" />
               返回
+            </Button>
+            <Button onClick={openEdit}>
+              <Pencil className="size-4" />
+              編輯活動
             </Button>
             <Button onClick={exportCsv}>
               <Download className="size-4" />
@@ -215,6 +281,65 @@ export default function EventDetailPage() {
           )}
         </div>
       </div>
+
+      <Modal
+        open={editOpen}
+        title="編輯活動"
+        onClose={() => setEditOpen(false)}
+        footer={
+          <>
+            <Button onClick={() => setEditOpen(false)}>取消</Button>
+            <Button
+              variant="primary"
+              onClick={saveEvent}
+              disabled={savingEvent || !form.name.trim() || !form.date}
+            >
+              {savingEvent ? '儲存中…' : '儲存'}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <Field label="活動名稱">
+            <TextInput
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              placeholder="2026 中秋禮品"
+            />
+          </Field>
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="類型">
+              <Select
+                value={form.type}
+                onChange={(e) =>
+                  setForm({ ...form, type: e.target.value as EventType })
+                }
+              >
+                {EVENT_TYPES.map((t) => (
+                  <option key={t} value={t}>
+                    {EVENT_TYPE_LABELS[t]}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="日期">
+              <TextInput
+                type="date"
+                value={form.date}
+                onChange={(e) => setForm({ ...form, date: e.target.value })}
+              />
+            </Field>
+          </div>
+          <Field label="備註">
+            <TextArea
+              rows={2}
+              value={form.note}
+              onChange={(e) => setForm({ ...form, note: e.target.value })}
+              placeholder="地點、預算、主辦人…"
+            />
+          </Field>
+        </div>
+      </Modal>
     </>
   )
 }
