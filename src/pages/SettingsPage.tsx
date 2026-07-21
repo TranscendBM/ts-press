@@ -7,7 +7,7 @@ import {
   serverTimestamp,
   setDoc,
 } from 'firebase/firestore'
-import { Plus, Trash2 } from 'lucide-react'
+import { AlertTriangle, Plus, Trash2 } from 'lucide-react'
 import { db } from '../lib/firebase'
 import { useAuth } from '../lib/AuthContext'
 import PageHeader from '../components/PageHeader'
@@ -16,7 +16,7 @@ import SmtpSettingsCard from '../components/SmtpSettingsCard'
 import RolePermissionsCard from '../components/RolePermissionsCard'
 import PressContactsCard from '../components/PressContactsCard'
 import { ROLES, ROLE_LABELS, normalizeRole, type Role } from '../constants'
-import { hasPermission } from '../../shared/permissions'
+import { hasPermission, validateUserDoc } from '../../shared/permissions'
 import type { AppUser } from '../types'
 
 /** 名單頁只是顯示用，真正的判斷在 Cloud Functions。 */
@@ -35,10 +35,22 @@ export default function SettingsPage() {
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [issues, setIssues] = useState<
+    { email: string; list: ReturnType<typeof validateUserDoc> }[]
+  >([])
 
   useEffect(() => {
     return onSnapshot(collection(db, 'users'), (snap) => {
       setUsers(snap.docs.map((d) => d.data() as AppUser))
+      // 只列出不符合現行結構的資料，不做任何自動修正
+      setIssues(
+        snap.docs
+          .map((d) => ({
+            email: d.id,
+            list: validateUserDoc(d.data() as Record<string, unknown>),
+          }))
+          .filter((r) => r.list.length > 0),
+      )
     })
   }, [])
 
@@ -124,6 +136,39 @@ export default function SettingsPage() {
         <RolePermissionsCard />
         <PressContactsCard />
         <SmtpSettingsCard />
+
+        {issues.length > 0 && (
+          <div className="rounded-xl border border-amber-300 bg-amber-50 p-5">
+            <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold text-amber-900">
+              <AlertTriangle className="size-4" />
+              有 {issues.length} 筆使用者資料不符合現行結構
+            </h2>
+            <p className="mb-3 text-xs text-amber-800">
+              以下資料僅列出、不會自動修正。請確認後手動調整 ——
+              擅自猜測修正可能把原本就該停用的帳號誤開通。
+            </p>
+            <div className="space-y-2">
+              {issues.map(({ email, list }) => (
+                <div
+                  key={email}
+                  className="rounded-lg border border-amber-200 bg-white p-3"
+                >
+                  <div className="text-sm font-medium text-slate-800">
+                    {email}
+                  </div>
+                  <ul className="mt-1 space-y-0.5">
+                    {list.map((i) => (
+                      <li key={i.field} className="text-xs text-slate-600">
+                        <code className="text-amber-800">{i.field}</code> ={' '}
+                        {i.actual} — {i.message}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
           <div className="border-b border-slate-200 px-4 py-3">

@@ -133,3 +133,58 @@ export function hasPermission(
   if (!normalized) return false
   return resolvePermissions(overrides)[normalized][permission] === true
 }
+
+/** users 文件的資料問題。只用於回報，不自動修正。 */
+export interface UserDocIssue {
+  field: 'role' | 'active' | 'email'
+  actual: string
+  message: string
+}
+
+/**
+ * 驗證一筆 users 文件是否符合現行結構。
+ *
+ * 與 firestore.rules 的 validUserDoc() 條件一致：
+ * role 必須是現行三個值之一、active 必須是布林值、email 必須是字串。
+ * 舊的 'editor' 會被標成需要遷移 —— 讀取時雖然還能對應到行銷專員，
+ * 但已不允許再寫入，留著會在下次編輯該使用者時被規則擋下。
+ */
+export function validateUserDoc(d: {
+  email?: unknown
+  role?: unknown
+  active?: unknown
+}): UserDocIssue[] {
+  const issues: UserDocIssue[] = []
+
+  const describe = (v: unknown) =>
+    v === undefined ? '（缺少欄位）' : `${JSON.stringify(v)}（${typeof v}）`
+
+  if (typeof d.email !== 'string' || !d.email) {
+    issues.push({
+      field: 'email',
+      actual: describe(d.email),
+      message: 'email 必須是非空字串',
+    })
+  }
+
+  if (typeof d.active !== 'boolean') {
+    issues.push({
+      field: 'active',
+      actual: describe(d.active),
+      message: 'active 必須是布林值 true / false，字串或缺漏都會被判定為未授權',
+    })
+  }
+
+  if (typeof d.role !== 'string' || !(ROLES as readonly string[]).includes(d.role)) {
+    const legacy = typeof d.role === 'string' && d.role in LEGACY_ROLES
+    issues.push({
+      field: 'role',
+      actual: describe(d.role),
+      message: legacy
+        ? `'${d.role}' 是舊代號，目前仍可讀取（對應到${ROLE_LABELS[LEGACY_ROLES[d.role as string]]}），但無法再寫入，建議更新`
+        : `role 必須是 ${ROLES.join(' / ')} 其中之一`,
+    })
+  }
+
+  return issues
+}

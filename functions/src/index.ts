@@ -213,7 +213,14 @@ async function authorize(
   return { ...(snap?.data() ?? {}), email: email as string } as AuthorizedUser
 }
 
-/** 後台可覆寫的權限矩陣。讀不到就退回預設值。 */
+/**
+ * 讀取後台的權限覆寫設定。
+ *
+ * 「文件不存在」與「讀取失敗」必須分開處理：
+ * - 不存在 → 從未設定過，用預設矩陣是正確行為
+ * - 讀取失敗 → 可能管理員已撤銷某角色的權限但我們讀不到，
+ *   此時退回預設等於把撤銷掉的權限還給對方（fail open），必須直接拒絕。
+ */
 async function readPermissionOverrides(): Promise<
   Record<string, Partial<RolePermissions>> | undefined
 > {
@@ -223,9 +230,11 @@ async function readPermissionOverrides(): Promise<
       ? (snap.data()?.roles as Record<string, Partial<RolePermissions>>)
       : undefined
   } catch (err) {
-    // 讀不到設定時採用預設權限，寧可嚴格也不要放行
-    logger.warn('讀取權限設定失敗，改用預設值', err)
-    return undefined
+    logger.error('讀取權限設定失敗，拒絕本次操作', err)
+    throw new HttpsError(
+      'unavailable',
+      '無法讀取權限設定，為安全起見已中止操作，請稍後再試。',
+    )
   }
 }
 

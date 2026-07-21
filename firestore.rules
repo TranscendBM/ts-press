@@ -20,10 +20,27 @@ service cloud.firestore {
       return isWhitelisted() && userDoc().role == 'admin';
     }
 
-    // 白名單本身只有 admin 能改；每個人可以讀（前端要顯示角色）
+    /**
+     * 白名單文件的資料驗證。
+     *
+     * role 只收現行的三個值 —— 舊資料裡的 'editor' 仍可讀取（規則只驗寫入），
+     * 但不允許再寫入，避免舊代號無限延續。
+     * active 必須是布林值：字串 "true" 之類的髒資料會讓授權判斷失準。
+     */
+    function validUserDoc(d) {
+      return d.role in ['admin', 'manager', 'specialist']
+        && d.active is bool
+        && d.email is string;
+    }
+
+    // 白名單本身只有 admin 能改；每個人可以讀（前端要顯示角色）。
+    // delete 要與 create/update 分開 —— 刪除時沒有 request.resource，
+    // 在同一條規則裡驗欄位會讓刪除永遠失敗。
     match /users/{email} {
       allow read: if isWhitelisted();
-      allow write: if isAdmin();
+      allow create, update: if isAdmin()
+        && validUserDoc(request.resource.data);
+      allow delete: if isAdmin();
     }
 
     // SMTP 連線設定：只放非機密欄位（主機／埠／帳號／Reply-To），
@@ -37,6 +54,52 @@ service cloud.firestore {
     match /settings/email {
       allow read: if isWhitelisted();
       allow write: if isAdmin();
+    }
+
+
+    // ---- settings/permissions 的結構驗證 ----
+    // 規則層自己驗一次，不倚賴前端送來的內容。
+    // 任何未知的角色、未知的權限鍵、非布林值都直接拒絕（fail closed）。
+
+    function validPermissionMap(m) {
+      return m is map
+        && m.keys().hasOnly(['viewPress', 'editPress', 'downloadPress', 'sendTest', 'sendReal', 'manageContacts', 'manageEvents', 'viewCampaigns', 'manageUsers', 'manageSettings'])
+        && (!('viewPress' in m) || m['viewPress'] is bool)
+        && (!('editPress' in m) || m['editPress'] is bool)
+        && (!('downloadPress' in m) || m['downloadPress'] is bool)
+        && (!('sendTest' in m) || m['sendTest'] is bool)
+        && (!('sendReal' in m) || m['sendReal'] is bool)
+        && (!('manageContacts' in m) || m['manageContacts'] is bool)
+        && (!('manageEvents' in m) || m['manageEvents'] is bool)
+        && (!('viewCampaigns' in m) || m['viewCampaigns'] is bool)
+        && (!('manageUsers' in m) || m['manageUsers'] is bool)
+        && (!('manageSettings' in m) || m['manageSettings'] is bool);
+    }
+
+    function validRolesMap(roles) {
+      return roles is map
+        && roles.keys().hasOnly(['admin', 'manager', 'specialist'])
+        && (!('admin' in roles) || validPermissionMap(roles['admin']))
+        && (!('manager' in roles) || validPermissionMap(roles['manager']))
+        && (!('specialist' in roles) || validPermissionMap(roles['specialist']));
+    }
+
+    // 管理者專屬權限不得授予其他角色，避免有人透過改權限文件提權
+    function noPrivilegeEscalation(roles) {
+      return true
+        && (!('manager' in roles) || !('manageUsers' in roles['manager']) || roles['manager']['manageUsers'] == false)
+        && (!('manager' in roles) || !('manageSettings' in roles['manager']) || roles['manager']['manageSettings'] == false)
+        && (!('specialist' in roles) || !('manageUsers' in roles['specialist']) || roles['specialist']['manageUsers'] == false)
+        && (!('specialist' in roles) || !('manageSettings' in roles['specialist']) || roles['specialist']['manageSettings'] == false);
+    }
+
+    match /settings/permissions {
+      allow read: if isWhitelisted();
+      allow write: if isAdmin()
+        && request.resource.data.keys().hasOnly(['roles', 'updatedAt'])
+        && 'roles' in request.resource.data
+        && validRolesMap(request.resource.data.roles)
+        && noPrivilegeEscalation(request.resource.data.roles);
     }
 
     // 系統介面的 logo。登入頁在通過驗證前就要顯示，所以必須公開可讀；

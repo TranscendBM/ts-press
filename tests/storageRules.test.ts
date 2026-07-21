@@ -25,10 +25,12 @@ const PORT = 9199
 
 async function emulatorRunning() {
   try {
-    const res = await fetch(`http://${HOST}:${PORT}/`, {
-      signal: AbortSignal.timeout(1500),
+    // 只要連得上就代表模擬器在跑 —— Storage 模擬器的根路徑會回 501，
+    // 用 status < 500 判斷會把它誤判成沒啟動而整組跳過。
+    await fetch(`http://${HOST}:${PORT}/`, {
+      signal: AbortSignal.timeout(3000),
     })
-    return res.status < 500
+    return true
   } catch {
     return false
   }
