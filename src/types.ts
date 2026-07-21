@@ -22,6 +22,11 @@ export interface MediaContact {
   id: string
   name: string
   email: string
+  /**
+   * 備用信箱。有些記者同時給了公司與個人信箱，
+   * 記在同一筆資料裡，避免建成兩筆造成名單重複。
+   */
+  altEmail?: string
   outlet: string
   title: string
   phone: string

@@ -11,6 +11,7 @@ import {
 import {
   ChevronDown,
   ListOrdered,
+  Merge,
   ChevronUp,
   ChevronsUpDown,
   Download,
@@ -47,12 +48,14 @@ import {
 } from '../constants'
 import type { MediaContact } from '../types'
 import { contactsToCsv, parseContactsCsv } from '../lib/csv'
+import ContactDetail from '../components/ContactDetail'
 
 type SortKey = 'rank' | 'outlet' | 'name' | 'title' | 'email' | 'language'
 
 const BLANK: Omit<MediaContact, 'id'> = {
   name: '',
   email: '',
+  altEmail: '',
   outlet: '',
   title: '',
   phone: '',
@@ -78,6 +81,8 @@ export default function ContactsPage() {
   const [draft, setDraft] = useState(BLANK)
   const [saving, setSaving] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  const [detail, setDetail] = useState<MediaContact | null>(null)
+  const [merging, setMerging] = useState(false)
 
   useEffect(() => {
     // 不在查詢端排序：Firestore 的 orderBy 會排除缺少該欄位的文件，排序改在前端做
@@ -105,9 +110,8 @@ export default function ContactsPage() {
     const rows = contacts.filter((c) => {
       if (tab !== 'all' && !(c.lists ?? []).includes(tab)) return false
       if (!kw) return true
-      return [c.name, c.email, c.outlet, c.title, c.phone]
-        .filter(Boolean)
-        .some((v) => v.toLowerCase().includes(kw))
+      return [c.name, c.email, c.altEmail, c.outlet, c.title, c.phone]
+        .some((v) => (v ?? '').toLowerCase().includes(kw))
     })
 
     const dir = sort.asc ? 1 : -1
@@ -153,6 +157,53 @@ export default function ContactsPage() {
       setSort({ key: 'rank', asc: true })
     } finally {
       setApplying(false)
+    }
+  }
+
+  /**
+   * 合併重複聯絡人：同一位記者若被建成多筆（例如公司信箱與個人信箱各一筆），
+   * 保留啟用中的那筆為主，其餘的信箱移到備用 Email 後刪除。
+   */
+  async function mergeDuplicates() {
+    const groups = new Map<string, MediaContact[]>()
+    for (const c of contacts) {
+      if (!c.name?.trim() || !c.outlet?.trim()) continue
+      const key = `${c.outlet.trim()}|${c.name.trim()}`
+      groups.set(key, [...(groups.get(key) ?? []), c])
+    }
+    const dupes = Array.from(groups.values()).filter((g) => g.length > 1)
+    if (dupes.length === 0) {
+      alert('沒有找到重複的聯絡人（以「媒體 + 姓名」判斷）。')
+      return
+    }
+
+    const preview = dupes
+      .map((g) => {
+        const primary = g.find((c) => c.active !== false) ?? g[0]
+        const others = g.filter((c) => c.id !== primary.id)
+        return `${primary.outlet} ${primary.name}\n  保留：${primary.email}\n  併入備用：${others.map((o) => o.email).join('、')}`
+      })
+      .join('\n\n')
+
+    if (!confirm(`找到 ${dupes.length} 組重複，將合併如下：\n\n${preview}`)) return
+
+    setMerging(true)
+    try {
+      for (const g of dupes) {
+        const primary = g.find((c) => c.active !== false) ?? g[0]
+        const others = g.filter((c) => c.id !== primary.id)
+        const alt =
+          primary.altEmail?.trim() || others.map((o) => o.email).join(', ')
+        await updateDoc(doc(db, 'mediaContacts', primary.id), {
+          altEmail: alt,
+          updatedAt: serverTimestamp(),
+        })
+        for (const o of others) {
+          await deleteDoc(doc(db, 'mediaContacts', o.id))
+        }
+      }
+    } finally {
+      setMerging(false)
     }
   }
 
@@ -235,6 +286,10 @@ export default function ContactsPage() {
               <ListOrdered className="size-4" />
               {applying ? '套用中…' : '套用建議分類'}
             </Button>
+            <Button onClick={mergeDuplicates} disabled={merging}>
+              <Merge className="size-4" />
+              {merging ? '合併中…' : '合併重複'}
+            </Button>
             <Button onClick={() => setImportOpen(true)}>
               <Upload className="size-4" />
               匯入 CSV
@@ -310,10 +365,6 @@ export default function ContactsPage() {
                   <SortTh sortKey="title" sort={sort} setSort={setSort}>
                     職稱
                   </SortTh>
-                  <SortTh sortKey="email" sort={sort} setSort={setSort}>
-                    Email
-                  </SortTh>
-                  <Th>電話</Th>
                   <Th>所屬名單</Th>
                   <SortTh sortKey="language" sort={sort} setSort={setSort}>
                     語言
@@ -325,7 +376,10 @@ export default function ContactsPage() {
                 {visible.map((c) => (
                   <tr
                     key={c.id}
-                    className={c.active === false ? 'opacity-45' : ''}
+                    onClick={() => setDetail(c)}
+                    className={`cursor-pointer transition hover:bg-slate-50 ${
+                      c.active === false ? 'opacity-45' : ''
+                    }`}
                   >
                     <Td className="text-center text-slate-400">
                       {c.rank ?? '—'}
@@ -353,10 +407,7 @@ export default function ContactsPage() {
                       )}
                     </Td>
                     <Td className="text-slate-500">{c.title || '—'}</Td>
-                    <Td className="text-slate-600">{c.email}</Td>
-                    <Td className="whitespace-nowrap text-slate-500">
-                      {c.phone || '—'}
-                    </Td>
+
                     <Td>
                       <div className="flex flex-wrap gap-1">
                         {(c.lists ?? []).map((l) => (
@@ -367,7 +418,10 @@ export default function ContactsPage() {
                       </div>
                     </Td>
                     <Td className="text-slate-500">{c.language}</Td>
-                    <Td className="text-right">
+                    <Td
+                      className="text-right"
+                      onClick={(e) => e.stopPropagation()}
+                    >
                       <div className="flex justify-end gap-1">
                         <IconBtn onClick={() => openEdit(c)} label="編輯">
                           <Pencil className="size-4" />
@@ -397,6 +451,12 @@ export default function ContactsPage() {
         saving={saving}
         onSave={save}
         onClose={closeModal}
+      />
+
+      <ContactDetail
+        contact={detail}
+        onClose={() => setDetail(null)}
+        onEdit={openEdit}
       />
 
       <ImportModal
@@ -469,6 +529,17 @@ function ContactModal({
               value={draft.email}
               onChange={(e) => setDraft({ ...draft, email: e.target.value })}
               placeholder="reporter@media.com"
+            />
+          </Field>
+          <Field
+            label="備用 Email"
+            hint="記者的第二信箱。發稿時不會另外寄一封，僅供查詢。"
+          >
+            <TextInput
+              type="email"
+              value={draft.altEmail ?? ''}
+              onChange={(e) => setDraft({ ...draft, altEmail: e.target.value })}
+              placeholder="選填"
             />
           </Field>
           <Field label="媒體名稱">
@@ -784,11 +855,17 @@ function SortTh({
 function Td({
   children,
   className = '',
+  onClick,
 }: {
   children: React.ReactNode
   className?: string
+  onClick?: React.MouseEventHandler<HTMLTableCellElement>
 }) {
-  return <td className={`px-4 py-3 align-middle ${className}`}>{children}</td>
+  return (
+    <td className={`px-4 py-3 align-middle ${className}`} onClick={onClick}>
+      {children}
+    </td>
+  )
 }
 
 function IconBtn({

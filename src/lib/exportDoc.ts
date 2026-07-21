@@ -2,6 +2,8 @@ import {
   AlignmentType,
   BorderStyle,
   Document,
+  Footer,
+  Header,
   HeadingLevel,
   ImageRun,
   Packer,
@@ -11,6 +13,7 @@ import {
 import {
   BRAND_COLOR,
   DEFAULT_ABOUT,
+  DEFAULT_EMAIL_LOGO,
   formatReleaseDate,
   renderEmailHtml,
   type TemplateInput,
@@ -27,6 +30,18 @@ import {
  */
 
 const BRAND_HEX = BRAND_COLOR.replace('#', '')
+
+/**
+ * 中文用微軟正黑體、英文用 Arial。
+ * Word 是靠 eastAsia 與 ascii 兩個屬性分別指定中西文字型，
+ * 只給一個字串會讓中文也套用 Arial 而變成系統替代字型。
+ */
+const FONTS = {
+  ascii: 'Arial',
+  hAnsi: 'Arial',
+  eastAsia: '微軟正黑體',
+  cs: 'Arial',
+}
 
 function saveBlob(blob: Blob, filename: string) {
   const a = document.createElement('a')
@@ -58,7 +73,7 @@ async function loadImage(
 function textParagraph(text: string, opts: { spacing?: number } = {}) {
   return new Paragraph({
     spacing: { after: opts.spacing ?? 200, line: 300 },
-    children: [new TextRun({ text, size: 22, font: 'Arial' })],
+    children: [new TextRun({ text, size: 22, font: FONTS })],
   })
 }
 
@@ -75,7 +90,7 @@ export async function downloadWord(input: TemplateInput, filename: string) {
           text: input.subject,
           bold: true,
           size: 34,
-          font: 'Arial',
+          font: FONTS,
           color: '12161C',
         }),
       ],
@@ -96,7 +111,7 @@ export async function downloadWord(input: TemplateInput, filename: string) {
             text: dateLine,
             size: 20,
             color: '8A919E',
-            font: 'Arial',
+            font: FONTS,
           }),
         ],
       }),
@@ -123,7 +138,7 @@ export async function downloadWord(input: TemplateInput, filename: string) {
               bold: true,
               size: 26,
               color: BRAND_HEX,
-              font: 'Arial',
+              font: FONTS,
             }),
           ],
         }),
@@ -165,7 +180,7 @@ export async function downloadWord(input: TemplateInput, filename: string) {
             bold: true,
             size: 22,
             color: BRAND_HEX,
-            font: 'Arial',
+            font: FONTS,
           }),
         ],
       }),
@@ -180,7 +195,7 @@ export async function downloadWord(input: TemplateInput, filename: string) {
         new Paragraph({
           spacing: { after: 60 },
           children: [
-            new TextRun({ text: line, size: 20, color: '4A505C', font: 'Arial' }),
+            new TextRun({ text: line, size: 20, color: '4A505C', font: FONTS }),
           ],
         }),
       )
@@ -199,7 +214,7 @@ export async function downloadWord(input: TemplateInput, filename: string) {
           bold: true,
           size: 20,
           color: '4A505C',
-          font: 'Arial',
+          font: FONTS,
         }),
       ],
     }),
@@ -210,11 +225,37 @@ export async function downloadWord(input: TemplateInput, filename: string) {
           text: `${about} ${aboutLink}`,
           size: 18,
           color: '8A919E',
-          font: 'Arial',
+          font: FONTS,
         }),
       ],
     }),
   )
+
+  // 頁首：品牌色底 + 白色 logo，重現信件的視覺
+  const logo = await loadImage(input.logoUrl?.trim() || DEFAULT_EMAIL_LOGO)
+  const headerChildren = [
+    new Paragraph({
+      shading: { fill: BRAND_HEX },
+      spacing: { before: 60, after: 60 },
+      children: logo
+        ? [
+            new ImageRun({
+              type: 'png',
+              data: logo.data,
+              transformation: { width: 130, height: 15 },
+            }),
+          ]
+        : [
+            new TextRun({
+              text: 'TRANSCEND',
+              bold: true,
+              color: 'FFFFFF',
+              size: 22,
+              font: FONTS,
+            }),
+          ],
+    }),
+  ]
 
   const doc = new Document({
     creator: 'Transcend Press Center',
@@ -222,7 +263,26 @@ export async function downloadWord(input: TemplateInput, filename: string) {
     sections: [
       {
         properties: {
-          page: { margin: { top: 1000, bottom: 1000, left: 1000, right: 1000 } },
+          page: { margin: { top: 1200, bottom: 1200, left: 1000, right: 1000 } },
+        },
+        headers: { default: new Header({ children: headerChildren }) },
+        footers: {
+          default: new Footer({
+            children: [
+              new Paragraph({
+                shading: { fill: BRAND_HEX },
+                spacing: { before: 60, after: 60 },
+                children: [
+                  new TextRun({
+                    text: '© Transcend Information, Inc. All Rights Reserved.',
+                    color: 'FFFFFF',
+                    size: 15,
+                    font: FONTS,
+                  }),
+                ],
+              }),
+            ],
+          }),
         },
         children,
       },

@@ -63,7 +63,7 @@ export const MEDIA_TYPES = [
 export type MediaType = (typeof MEDIA_TYPES)[number]
 
 export const MEDIA_TYPE_LABELS: Record<MediaType, string> = {
-  paper: '傳統紙媒',
+  paper: '傳統媒體',
   tv: '電視媒體',
   magazine: '雜誌',
   finance: '財經媒體',
@@ -90,7 +90,7 @@ export const MEDIA_TYPE_ORDER: Record<MediaType, number> = {
  */
 export const MEDIA_TIER_MAP: Record<string, { type: MediaType; rank: number }> =
   {
-    // 1. 傳統紙媒（報紙、通訊社）
+    // 1. 傳統媒體（報紙、通訊社）
     中央社: { type: 'paper', rank: 1 },
     經濟日報: { type: 'paper', rank: 2 },
     聯合報: { type: 'paper', rank: 3 },

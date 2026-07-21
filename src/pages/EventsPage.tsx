@@ -28,6 +28,7 @@ import {
   GIFT_TYPES,
   type EventType,
 } from '../constants'
+import { LayoutGrid } from 'lucide-react'
 import type { MediaEvent } from '../types'
 import { todayIso } from '../lib/helpers'
 
@@ -35,6 +36,7 @@ export default function EventsPage() {
   const [events, setEvents] = useState<MediaEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [yearFilter, setYearFilter] = useState<number | 'all'>('all')
+  const [typeFilter, setTypeFilter] = useState<EventType | 'all'>('all')
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [draft, setDraft] = useState({
@@ -68,10 +70,12 @@ export default function EventsPage() {
 
   const visible = useMemo(
     () =>
-      yearFilter === 'all'
-        ? events
-        : events.filter((e) => e.year === yearFilter),
-    [events, yearFilter],
+      events.filter((e) => {
+        if (yearFilter !== 'all' && e.year !== yearFilter) return false
+        if (typeFilter !== 'all' && e.type !== typeFilter) return false
+        return true
+      }),
+    [events, yearFilter, typeFilter],
   )
 
   async function create() {
@@ -108,15 +112,33 @@ export default function EventsPage() {
         title="媒體關係"
         description="記錄餐敘、茶會與年節禮品的往來，每位媒體都能單獨備註。"
         actions={
-          <Button variant="primary" onClick={() => setOpen(true)}>
-            <Plus className="size-4" />
-            新增活動
-          </Button>
+          <>
+            <Button onClick={() => navigate('/events/matrix')}>
+              <LayoutGrid className="size-4" />
+              交叉檢視
+            </Button>
+            <Button variant="primary" onClick={() => setOpen(true)}>
+              <Plus className="size-4" />
+              新增活動
+            </Button>
+          </>
         }
       />
 
       <div className="p-8">
-        <div className="mb-5 w-40">
+        <div className="mb-5 flex flex-wrap gap-3">
+          <Select
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value as EventType | 'all')}
+            className="w-44"
+          >
+            <option value="all">全部類型</option>
+            {EVENT_TYPES.map((t) => (
+              <option key={t} value={t}>
+                {EVENT_TYPE_LABELS[t]}
+              </option>
+            ))}
+          </Select>
           <Select
             value={String(yearFilter)}
             onChange={(e) =>
@@ -124,6 +146,7 @@ export default function EventsPage() {
                 e.target.value === 'all' ? 'all' : Number(e.target.value),
               )
             }
+            className="w-36"
           >
             <option value="all">全部年份</option>
             {years.map((y) => (
