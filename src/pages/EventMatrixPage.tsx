@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { collection, getDocs } from 'firebase/firestore'
-import { Check, Download } from 'lucide-react'
+import { Check, Download, Star } from 'lucide-react'
 import { db } from '../lib/firebase'
 import PageHeader from '../components/PageHeader'
 import { Badge, Button, Select } from '../components/ui'
@@ -14,6 +14,7 @@ import {
   type ListId,
 } from '../constants'
 import type { EventParticipant, MediaContact, MediaEvent } from '../types'
+import { compareContacts } from '../lib/sortContacts'
 
 type Records = Record<string, Record<string, EventParticipant>>
 
@@ -81,12 +82,7 @@ export default function EventMatrixPage() {
       }
       return true
     })
-    return list.sort((a, b) => {
-      const ar = a.rank ?? Number.MAX_SAFE_INTEGER
-      const br = b.rank ?? Number.MAX_SAFE_INTEGER
-      if (ar !== br) return ar - br
-      return (a.outlet ?? '').localeCompare(b.outlet ?? '', 'zh-Hant')
-    })
+    return list.sort(compareContacts)
   }, [contacts, listFilter, onlyMarked, columns, records])
 
   function countFor(eventId: string) {
@@ -220,6 +216,12 @@ export default function EventMatrixPage() {
                   return (
                     <tr key={c.id} className={total === 0 ? 'opacity-50' : ''}>
                       <td className="sticky left-0 z-10 bg-white px-4 py-2.5 whitespace-nowrap">
+                        {c.starred && (
+                          <Star
+                            className="mr-1.5 inline-block size-3.5 text-amber-400"
+                            fill="currentColor"
+                          />
+                        )}
                         <span className="font-medium text-slate-900">
                           {c.outlet || '—'}
                         </span>

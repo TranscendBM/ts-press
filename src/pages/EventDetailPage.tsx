@@ -8,7 +8,7 @@ import {
   serverTimestamp,
   setDoc,
 } from 'firebase/firestore'
-import { ArrowLeft, Download, Search } from 'lucide-react'
+import { ArrowLeft, Download, Search, Star } from 'lucide-react'
 import { db } from '../lib/firebase'
 import PageHeader from '../components/PageHeader'
 import { Button, Select, TextInput } from '../components/ui'
@@ -20,6 +20,7 @@ import {
   type ListId,
 } from '../constants'
 import type { EventParticipant, MediaContact, MediaEvent } from '../types'
+import { compareContacts } from '../lib/sortContacts'
 
 export default function EventDetailPage() {
   const { id } = useParams<{ id: string }>()
@@ -77,9 +78,7 @@ export default function EventDetailPage() {
           .filter(Boolean)
           .some((v) => v.toLowerCase().includes(kw))
       })
-      .sort((a, b) =>
-        (a.outlet ?? '').localeCompare(b.outlet ?? '', 'zh-Hant'),
-      )
+      .sort(compareContacts)
   }, [contacts, listFilter, search, onlyMarked, records])
 
   const markedCount = Object.values(records).filter((r) => r.attended).length
@@ -261,7 +260,15 @@ function ParticipantRow({
         />
       </td>
       <td className="px-4 py-2.5 font-medium text-slate-900">
-        {contact.outlet || '—'}
+        <span className="inline-flex items-center gap-1.5">
+          {contact.starred && (
+            <Star
+              className="size-3.5 shrink-0 text-amber-400"
+              fill="currentColor"
+            />
+          )}
+          {contact.outlet || '—'}
+        </span>
       </td>
       <td className="px-4 py-2.5 text-slate-600">
         {contact.name || <span className="text-slate-400">（未填姓名）</span>}

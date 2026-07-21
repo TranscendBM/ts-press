@@ -35,6 +35,8 @@ export interface MediaContact {
   mediaType?: MediaType
   /** 重要性排序，數字越小越前面。未設定為 null，排在最後。 */
   rank?: number | null
+  /** 標記為重要窗口。排序時一律排在最前面，優先於 rank。 */
+  starred?: boolean
   /** 可同時屬於多個名單。 */
   lists: ListId[]
   /** 這位聯絡人要收到哪個語言版本。 */

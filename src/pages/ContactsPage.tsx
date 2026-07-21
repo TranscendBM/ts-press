@@ -11,6 +11,7 @@ import {
 import {
   ChevronDown,
   ListOrdered,
+  Star,
   Merge,
   ChevronUp,
   ChevronsUpDown,
@@ -49,6 +50,7 @@ import {
 import type { MediaContact } from '../types'
 import { contactsToCsv, parseContactsCsv } from '../lib/csv'
 import ContactDetail from '../components/ContactDetail'
+import { compareContacts } from '../lib/sortContacts'
 
 type SortKey = 'rank' | 'outlet' | 'name' | 'title' | 'email' | 'language'
 
@@ -62,6 +64,7 @@ const BLANK: Omit<MediaContact, 'id'> = {
   note: '',
   mediaType: 'other',
   rank: null,
+  starred: false,
   lists: [],
   language: 'tw',
   active: true,
@@ -117,11 +120,8 @@ export default function ContactsPage() {
     const dir = sort.asc ? 1 : -1
     return rows.sort((a, b) => {
       if (sort.key === 'rank') {
-        // 未設定重要性的一律排最後，不論升冪或降冪
-        const ar = a.rank ?? Number.MAX_SAFE_INTEGER
-        const br = b.rank ?? Number.MAX_SAFE_INTEGER
-        if (ar !== br) return (ar - br) * dir
-        return (a.outlet ?? '').localeCompare(b.outlet ?? '', 'zh-Hant')
+        // 重要窗口最前、其次 rank；未設定 rank 的一律墊底
+        return compareContacts(a, b) * dir
       }
       const av = (a[sort.key] ?? '') as string
       const bv = (b[sort.key] ?? '') as string
@@ -205,6 +205,14 @@ export default function ContactsPage() {
     } finally {
       setMerging(false)
     }
+  }
+
+  async function toggleStar(e: React.MouseEvent, c: MediaContact) {
+    e.stopPropagation()
+    await updateDoc(doc(db, 'mediaContacts', c.id), {
+      starred: !c.starred,
+      updatedAt: serverTimestamp(),
+    })
   }
 
   function openNew() {
@@ -352,6 +360,7 @@ export default function ContactsPage() {
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-left text-xs text-slate-500">
                 <tr>
+                  <Th className="w-10">{null}</Th>
                   <SortTh sortKey="rank" sort={sort} setSort={setSort}>
                     重要性
                   </SortTh>
@@ -381,6 +390,24 @@ export default function ContactsPage() {
                       c.active === false ? 'opacity-45' : ''
                     }`}
                   >
+                    <Td
+                      className="pr-0 text-center"
+                      onClick={(e) => toggleStar(e, c)}
+                    >
+                      <button
+                        title={c.starred ? '取消重要窗口' : '標記為重要窗口'}
+                        className={`rounded p-1 transition ${
+                          c.starred
+                            ? 'text-amber-400 hover:text-amber-500'
+                            : 'text-slate-200 hover:text-slate-400'
+                        }`}
+                      >
+                        <Star
+                          className="size-4"
+                          fill={c.starred ? 'currentColor' : 'none'}
+                        />
+                      </button>
+                    </Td>
                     <Td className="text-center text-slate-400">
                       {c.rank ?? '—'}
                     </Td>

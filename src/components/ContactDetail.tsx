@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { collection, getDocs } from 'firebase/firestore'
-import { CalendarDays, Gift, Mail, Phone, Users } from 'lucide-react'
+import { CalendarDays, Gift, Mail, Phone, Star, Users } from 'lucide-react'
 import { db } from '../lib/firebase'
 import { Badge, Button, Modal } from './ui'
 import {
@@ -85,6 +85,9 @@ export default function ContactDetail({
     >
       <div className="space-y-6">
         <div className="flex flex-wrap items-center gap-2">
+          {contact.starred && (
+            <Star className="size-5 text-amber-400" fill="currentColor" />
+          )}
           <span className="text-lg font-semibold text-slate-900">
             {contact.outlet || '—'}
           </span>
