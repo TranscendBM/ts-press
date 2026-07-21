@@ -9,7 +9,6 @@ import {
   Packer,
   Paragraph,
   Tab,
-  TabStopPosition,
   TabStopType,
   TextRun,
 } from 'docx'
@@ -48,11 +47,10 @@ const DOC_LOGO = new URL('/logo-dark.png', window.location.origin).href
 /**
  * logo 與頁首底線之間的距離（點）。
  *
- * 光靠 w:space 不夠 —— OOXML 的框線間距是從「文字基線」量起，
- * 內嵌圖片會超出基線之下，視覺上仍會貼著線。因此另外在 logo 之後
- * 插入一個換行，用一整行的高度把兩者錯開。
+ * OOXML 的框線間距是從「文字基線」量起，而內嵌圖片會超出基線之下，
+ * 所以這個值要比實際想要的間距再大一些才夠。
  */
-const BORDER_SPACE_PT = 12
+const BORDER_SPACE_PT = 18
 
 /**
  * 頁首額外增加的高度（0.5cm）。
@@ -61,6 +59,25 @@ const BORDER_SPACE_PT = 12
  * 否則內文起始位置不變、頁首長高後會壓到正文。
  */
 const HEADER_EXTRA_TWIPS = 283
+
+/**
+ * 版面尺寸（twip）。刻意寫死 A4 而不用套件預設 ——
+ * 右靠定位點要算得準就必須知道實際的可用寬度，
+ * 用 TabStopPosition.MAX（9026）會短少約 880 twip 而切不齊右邊界。
+ */
+const PAGE_WIDTH = 11906
+const PAGE_HEIGHT = 16838
+const MARGIN_X = 1000
+/** 內容區寬度，也就是右邊界的位置。 */
+const RIGHT_EDGE = PAGE_WIDTH - MARGIN_X * 2
+
+/** 字級（docx 的 size 單位是半點，所以是點數 × 2）。 */
+const SIZE_TITLE = 36 // 18pt
+const SIZE_BODY = 24 // 12pt
+const SIZE_HEADER_LABEL = 20 // 10pt
+
+/** 頁首 logo 寬度（點）。原本 120，依需求放大 1.15 倍。 */
+const LOGO_WIDTH = Math.round(120 * 1.15)
 
 /**
  * 中文用微軟正黑體、英文用 Arial。
@@ -109,7 +126,7 @@ async function loadImage(url: string): Promise<LoadedImage | null> {
 function textParagraph(text: string, opts: { spacing?: number } = {}) {
   return new Paragraph({
     spacing: { after: opts.spacing ?? 200, line: 300 },
-    children: [new TextRun({ text, size: 22, font: FONTS })],
+    children: [new TextRun({ text, size: SIZE_BODY, font: FONTS })],
   })
 }
 
@@ -125,7 +142,7 @@ export async function downloadWord(input: TemplateInput, filename: string) {
         new TextRun({
           text: input.subject,
           bold: true,
-          size: 34,
+          size: SIZE_TITLE,
           font: FONTS,
           color: '12161C',
         }),
@@ -285,13 +302,13 @@ export async function downloadWord(input: TemplateInput, filename: string) {
         },
       },
       // 靠右的定位點讓「新聞稿」與 logo 排在同一行的兩端
-      tabStops: [{ type: TabStopType.RIGHT, position: TabStopPosition.MAX }],
+      tabStops: [{ type: TabStopType.RIGHT, position: RIGHT_EDGE }],
       children: [
         logo
           ? new ImageRun({
               type: logo.info.format,
               data: logo.data,
-              transformation: scaleToWidth(logo.info, 120),
+              transformation: scaleToWidth(logo.info, LOGO_WIDTH),
             })
           : new TextRun({
               text: 'TRANSCEND',
@@ -303,12 +320,9 @@ export async function downloadWord(input: TemplateInput, filename: string) {
         new TextRun({
           children: [new Tab(), headerLabel],
           color: '8A919E',
-          size: 18,
+          size: SIZE_HEADER_LABEL,
           font: FONTS,
         }),
-        // 空白的一行：logo 與「新聞稿」仍在同一行，但底下多空一行，
-        // 圖片才不會黏著紅線。docx 是用 break 選項在此 run 之前插入換行。
-        new TextRun({ text: '', break: 1, size: 18, font: FONTS }),
       ],
     }),
   ]
@@ -320,12 +334,13 @@ export async function downloadWord(input: TemplateInput, filename: string) {
       {
         properties: {
           page: {
+            size: { width: PAGE_WIDTH, height: PAGE_HEIGHT },
             // 上邊界跟著頁首一起加高，內文才不會被壓到
             margin: {
               top: 1200 + HEADER_EXTRA_TWIPS,
               bottom: 1200,
-              left: 1000,
-              right: 1000,
+              left: MARGIN_X,
+              right: MARGIN_X,
             },
           },
         },
