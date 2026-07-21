@@ -49,6 +49,14 @@ const DOC_LOGO = new URL('/logo-dark.png', window.location.origin).href
 const BORDER_SPACE_PT = 9
 
 /**
+ * 頁首額外增加的高度（0.5cm）。
+ * docx 的行距單位是 twip（1/20 點）：0.5 ÷ 2.54 × 72 × 20 ≒ 283。
+ * 這段空白加在底線之下、仍屬頁首範圍，同時把頁面上邊界一起加大，
+ * 否則內文起始位置不變、頁首長高後會壓到正文。
+ */
+const HEADER_EXTRA_TWIPS = 283
+
+/**
  * 中文用微軟正黑體、英文用 Arial。
  * Word 是靠 eastAsia 與 ascii 兩個屬性分別指定中西文字型，
  * 只給一個字串會讓中文也套用 Arial 而變成系統替代字型。
@@ -260,7 +268,7 @@ export async function downloadWord(input: TemplateInput, filename: string) {
   const headerLabel = input.language === 'tw' ? '新聞稿' : 'Press Release'
   const headerChildren = [
     new Paragraph({
-      spacing: { before: 40 },
+      spacing: { before: 40, after: HEADER_EXTRA_TWIPS },
       border: {
         bottom: {
           style: BorderStyle.SINGLE,
@@ -302,7 +310,15 @@ export async function downloadWord(input: TemplateInput, filename: string) {
     sections: [
       {
         properties: {
-          page: { margin: { top: 1200, bottom: 1200, left: 1000, right: 1000 } },
+          page: {
+            // 上邊界跟著頁首一起加高，內文才不會被壓到
+            margin: {
+              top: 1200 + HEADER_EXTRA_TWIPS,
+              bottom: 1200,
+              left: 1000,
+              right: 1000,
+            },
+          },
         },
         headers: { default: new Header({ children: headerChildren }) },
         footers: {
