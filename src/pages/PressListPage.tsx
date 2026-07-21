@@ -28,12 +28,14 @@ import {
 } from '../constants'
 import type { PressRelease } from '../types'
 import { blankVersions, formatDate, todayIso } from '../lib/helpers'
+import { deletePressFile, describeStorageError } from '../lib/storage'
 
 export default function PressListPage() {
   const [items, setItems] = useState<PressRelease[]>([])
   const [loading, setLoading] = useState(true)
   const [category, setCategory] = useState<Category | 'all'>('all')
   const [year, setYear] = useState<string>('all')
+  const [error, setError] = useState('')
   const navigate = useNavigate()
   const { appUser } = useAuth()
 
@@ -107,8 +109,29 @@ export default function PressListPage() {
 
   async function remove(e: React.MouseEvent, item: PressRelease) {
     e.stopPropagation()
-    if (!confirm(`確定要刪除「${item.title}」嗎？`)) return
-    await deleteDoc(doc(db, 'pressReleases', item.id))
+    if (!confirm(`確定要刪除「${item.title}」嗎？附件與圖片也會一併刪除。`)) {
+      return
+    }
+    setError('')
+    // 先清 Storage 再刪文件：反過來的話檔案路徑就查不到了，會變成孤兒檔案
+    const paths = [
+      ...(item.attachments ?? []).map((a) => a.path),
+      ...LANGUAGES.map((l) => item.versions?.[l]?.heroImage?.path),
+    ].filter((p): p is string => !!p)
+
+    try {
+      for (const path of paths) await deletePressFile(path)
+    } catch (err) {
+      setError(
+        `刪除檔案失敗，新聞稿未刪除：${describeStorageError(err)}`,
+      )
+      return
+    }
+    try {
+      await deleteDoc(doc(db, 'pressReleases', item.id))
+    } catch (err) {
+      setError(`刪除新聞稿失敗：${(err as Error).message}`)
+    }
   }
 
   function renderRow(item: PressRelease) {
@@ -178,6 +201,11 @@ export default function PressListPage() {
       />
 
       <div className="p-8">
+        {error && (
+          <div className="mb-5 rounded-lg bg-red-50 p-3 text-sm text-red-700">
+            {error}
+          </div>
+        )}
         <div className="mb-5 flex flex-wrap gap-3">
           <Select
             value={category}

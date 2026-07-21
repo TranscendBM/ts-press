@@ -13,14 +13,35 @@ import {
   type User,
 } from 'firebase/auth'
 import { doc, getDoc } from 'firebase/firestore'
-import { auth, db, googleProvider } from './firebase'
+import { httpsCallable } from 'firebase/functions'
+import { auth, db, functions, googleProvider } from './firebase'
 import type { AppUser } from '../types'
 
 /**
  * 登入被拒的原因。任何 Google 帳號都能按登入，
  * 但只有被加進 users 白名單（且未停用）的 email 才進得來。
  */
-export type AuthDenial = 'not-whitelisted' | null
+export type AuthDenial = 'not-whitelisted' | 'lookup-failed' | null
+
+const refreshMyClaims = httpsCallable<void, { ok: boolean; role: string | null }>(
+  functions,
+  'refreshMyClaims',
+)
+
+/** token 的 claim 與白名單不符時補發，並強制刷新 token。 */
+async function syncClaimsIfStale(user: User, expectedRole: string | undefined) {
+  try {
+    const token = await user.getIdTokenResult()
+    if (token.claims.pressCenter === true && token.claims.role === expectedRole) {
+      return
+    }
+    await refreshMyClaims()
+    await user.getIdToken(true)
+  } catch (err) {
+    // 補發失敗不該擋住登入，只是某些上傳功能可能暫時不能用
+    console.warn('補發權限 claim 失敗', err)
+  }
+}
 
 interface AuthState {
   firebaseUser: User | null
@@ -52,29 +73,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const email = (user.email ?? '').toLowerCase()
 
-      // 白名單文件的 id 就是 email
-      const snap = await getDoc(doc(db, 'users', email))
-      const data = snap.exists() ? (snap.data() as AppUser) : null
-
-      if (!data || data.active === false) {
-        setDenial('not-whitelisted')
-        await signOut(auth)
-        setLoading(false)
-        return
-      }
-
-      // 後端 trigger 會依白名單寫入 pressCenter custom claim，
-      // 首次登入時 token 還沒有它，強制刷新一次才能通過 Storage 規則。
+      // 不在白名單時安全規則會回 permission-denied（不是空結果）。
+      // 少了 try/catch 這裡會直接 throw，loading 永遠停在 true，
+      // 使用者就卡在「載入中」而看不到任何說明。
       try {
-        await user.getIdToken(true)
-      } catch {
-        // 刷新失敗不擋登入，最多是這次 session 無法上傳檔案
-      }
+        const snap = await getDoc(doc(db, 'users', email))
+        const data = snap.exists() ? (snap.data() as AppUser) : null
 
-      setDenial(null)
-      setFirebaseUser(user)
-      setAppUser({ ...data, email: email.toLowerCase() })
-      setLoading(false)
+        // 與後端 evaluateAccess 一致：必須明確 active === true
+        if (!data || data.active !== true) {
+          setDenial('not-whitelisted')
+          await signOut(auth)
+          return
+        }
+
+        setDenial(null)
+        setFirebaseUser(user)
+        setAppUser({ ...data, email })
+        // Storage 規則看 token 裡的 pressCenter / role，白名單改了角色
+        // 但 token 還沒更新時上傳會被擋。不一致就補發並刷新。
+        await syncClaimsIfStale(user, data.role)
+      } catch (err) {
+        const code = (err as { code?: string }).code
+        if (code === 'permission-denied') {
+          setDenial('not-whitelisted')
+        } else {
+          console.error('讀取白名單失敗', err)
+          setDenial('lookup-failed')
+        }
+        await signOut(auth).catch(() => {})
+      } finally {
+        // 不論成功或失敗都要收掉載入狀態
+        setLoading(false)
+      }
     })
   }, [])
 

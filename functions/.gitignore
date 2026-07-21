@@ -2,3 +2,5 @@ node_modules/
 lib/
 *.local
 .env
+src/emailTemplate.generated.ts
+src/policy.generated.ts

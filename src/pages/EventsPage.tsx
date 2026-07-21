@@ -3,13 +3,12 @@ import { useNavigate } from 'react-router-dom'
 import {
   addDoc,
   collection,
-  deleteDoc,
-  doc,
   onSnapshot,
   serverTimestamp,
 } from 'firebase/firestore'
+import { httpsCallable } from 'firebase/functions'
 import { CalendarDays, Gift, Plus, Trash2, Users } from 'lucide-react'
-import { db } from '../lib/firebase'
+import { db, functions } from '../lib/firebase'
 import { useAuth } from '../lib/AuthContext'
 import PageHeader from '../components/PageHeader'
 import {
@@ -33,11 +32,18 @@ import { LayoutGrid } from 'lucide-react'
 import type { MediaEvent } from '../types'
 import { todayIso } from '../lib/helpers'
 
+const deleteMediaEvent = httpsCallable<
+  { eventId: string },
+  { ok: boolean; participantsRemoved: number }
+>(functions, 'deleteMediaEvent')
+
 export default function EventsPage() {
   const [events, setEvents] = useState<MediaEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [yearFilter, setYearFilter] = useState<number | 'all'>('all')
   const [typeFilter, setTypeFilter] = useState<EventType | 'all'>('all')
+  const [deleting, setDeleting] = useState<string | null>(null)
+  const [error, setError] = useState('')
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [draft, setDraft] = useState({
@@ -104,7 +110,18 @@ export default function EventsPage() {
   async function remove(e: React.MouseEvent, item: MediaEvent) {
     e.stopPropagation()
     if (!confirm(`確定要刪除「${item.name}」嗎？參加紀錄也會一併刪除。`)) return
-    await deleteDoc(doc(db, 'mediaEvents', item.id))
+    setError('')
+    setDeleting(item.id)
+    try {
+      // 交給 Cloud Function 處理，前端直接 deleteDoc 會留下 participants 孤兒資料
+      await deleteMediaEvent({ eventId: item.id })
+    } catch (err) {
+      setError(
+        (err as { message?: string }).message ?? '刪除失敗，請稍後再試。',
+      )
+    } finally {
+      setDeleting(null)
+    }
   }
 
   return (
@@ -127,6 +144,11 @@ export default function EventsPage() {
       />
 
       <div className="p-8">
+        {error && (
+          <div className="mb-5 rounded-lg bg-red-50 p-3 text-sm text-red-700">
+            {error}
+          </div>
+        )}
         <div className="mb-5 flex flex-wrap gap-3">
           <Select
             value={typeFilter}
@@ -213,8 +235,9 @@ export default function EventsPage() {
                   </div>
                   <button
                     onClick={(e) => remove(e, item)}
+                    disabled={deleting === item.id}
                     title="刪除"
-                    className="rounded-lg p-2 text-slate-300 transition hover:bg-red-50 hover:text-red-600"
+                    className="rounded-lg p-2 text-slate-300 transition hover:bg-red-50 hover:text-red-600 disabled:opacity-40"
                   >
                     <Trash2 className="size-4" />
                   </button>

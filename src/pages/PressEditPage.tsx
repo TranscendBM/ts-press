@@ -26,9 +26,14 @@ import {
 } from '../constants'
 import type { EmailSettings, PressRelease, StoredFile } from '../types'
 import { blankVersions, formatBytes } from '../lib/helpers'
-import { deletePressFile, uploadPressFile } from '../lib/storage'
-import { renderEmailHtml } from '../lib/emailTemplate'
+import {
+  deletePressFile,
+  describeStorageError,
+  uploadPressFile,
+} from '../lib/storage'
+import { renderEmailHtml } from '../../shared/emailTemplate'
 import { downloadPdf, downloadWord } from '../lib/exportDoc'
+import { saveThenNavigate } from '../lib/saveThenNavigate'
 
 export default function PressEditPage() {
   const { id } = useParams<{ id: string }>()
@@ -86,8 +91,12 @@ export default function PressEditPage() {
     }))
   }
 
-  async function save() {
-    if (!press || !id) return
+  /**
+   * 儲存稿件。回傳是否成功 —— 呼叫端（例如「前往發送」）必須依這個結果
+   * 決定要不要離開頁面，否則儲存失敗時使用者會帶著未存檔的內容去發送。
+   */
+  async function save(): Promise<boolean> {
+    if (!press || !id) return false
     setSaving(true)
     setError('')
     try {
@@ -99,8 +108,13 @@ export default function PressEditPage() {
         updatedAt: serverTimestamp(),
       })
       setDirty(false)
-    } catch {
-      setError('儲存失敗，請確認網路連線後再試。')
+      return true
+    } catch (err) {
+      console.error('儲存新聞稿失敗', err)
+      setError(
+        `儲存失敗，內容尚未寫入資料庫：${(err as Error)?.message ?? '請確認網路連線後再試。'}`,
+      )
+      return false
     } finally {
       setSaving(false)
     }
@@ -123,8 +137,8 @@ export default function PressEditPage() {
         },
       }))
       if (old?.path) await deletePressFile(old.path)
-    } catch {
-      setError('圖片上傳失敗。')
+    } catch (err) {
+      setError(`圖片上傳失敗：${describeStorageError(err)}`)
     } finally {
       setUploading(false)
     }
@@ -133,12 +147,21 @@ export default function PressEditPage() {
   async function removeHero() {
     if (!press) return
     const old = press.versions[lang].heroImage
+    setError('')
+    // 先刪檔案再更新畫面，刪不掉就不要讓使用者以為已經移除
+    if (old?.path) {
+      try {
+        await deletePressFile(old.path)
+      } catch (err) {
+        setError(`圖片移除失敗：${describeStorageError(err)}`)
+        return
+      }
+    }
     patch((p) => {
       const next = { ...p.versions[lang] }
       delete next.heroImage
       return { ...p, versions: { ...p.versions, [lang]: next } }
     })
-    if (old?.path) await deletePressFile(old.path)
   }
 
   async function onAttachPick(e: React.ChangeEvent<HTMLInputElement>) {
@@ -161,19 +184,25 @@ export default function PressEditPage() {
       const uploaded: StoredFile[] = []
       for (const f of files) uploaded.push(await uploadPressFile(id, 'attachments', f))
       patch((p) => ({ ...p, attachments: [...p.attachments, ...uploaded] }))
-    } catch {
-      setError('附件上傳失敗。')
+    } catch (err) {
+      setError(`附件上傳失敗：${describeStorageError(err)}`)
     } finally {
       setUploading(false)
     }
   }
 
   async function removeAttachment(file: StoredFile) {
+    setError('')
+    try {
+      await deletePressFile(file.path)
+    } catch (err) {
+      setError(`附件移除失敗：${describeStorageError(err)}`)
+      return
+    }
     patch((p) => ({
       ...p,
       attachments: p.attachments.filter((a) => a.path !== file.path),
     }))
-    await deletePressFile(file.path)
   }
 
   if (loading) {
@@ -240,10 +269,14 @@ export default function PressEditPage() {
             </Button>
             <Button
               variant="primary"
-              onClick={async () => {
-                if (dirty) await save()
-                navigate(`/send?press=${press.id}`)
-              }}
+              onClick={() =>
+                // 儲存失敗就留在編輯頁，錯誤訊息已顯示在上方
+                saveThenNavigate({
+                  dirty,
+                  save,
+                  navigate: () => navigate(`/send?press=${press.id}`),
+                })
+              }
             >
               <Send className="size-4" />
               前往發送

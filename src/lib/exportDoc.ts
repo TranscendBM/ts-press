@@ -17,7 +17,7 @@ import {
   formatReleaseDate,
   renderEmailHtml,
   type TemplateInput,
-} from './emailTemplate'
+} from '../../shared/emailTemplate'
 
 /**
  * 新聞稿的下載功能。

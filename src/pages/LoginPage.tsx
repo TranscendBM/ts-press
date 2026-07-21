@@ -50,6 +50,12 @@ export default function LoginPage() {
           </p>
         </div>
 
+        {denial === 'lookup-failed' && (
+          <Notice>
+            無法確認你的權限，可能是網路問題。請稍後再試一次，
+            若持續發生請聯絡管理員。
+          </Notice>
+        )}
         {denial === 'not-whitelisted' && (
           <Notice>
             這個帳號尚未被授權使用本系統，請聯絡管理員將你加入名單。

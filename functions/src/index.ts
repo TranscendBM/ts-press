@@ -16,7 +16,25 @@ import {
   renderEmailHtml,
   renderEmailText,
   type PressContact,
-} from './emailTemplate'
+} from './emailTemplate.generated'
+import {
+  ATTACHMENT_LIMITS,
+  BATCH_SIZE,
+  chunk,
+  evaluateAccess,
+  isAllowedAttachmentPath,
+  type AppRole,
+} from './policy.generated'
+
+interface AuthorizedUser {
+  email: string
+  displayName?: string
+  role?: AppRole
+}
+
+type CallableAuth =
+  | { token?: { email?: string; email_verified?: boolean } }
+  | undefined
 
 initializeApp()
 setGlobalOptions({ region: 'asia-east1', maxInstances: 5 })
@@ -167,43 +185,119 @@ interface SendRequest {
   mode: SendMode
 }
 
-/** 確認呼叫者在白名單內；正式發送另外要求 admin / manager。 */
-async function authorize(email: string | undefined, needsSendRole: boolean) {
-  if (!email) {
-    throw new HttpsError('permission-denied', '請先登入。')
-  }
-  const snap = await db.collection('users').doc(email.toLowerCase()).get()
-  const user = snap.data()
-  if (!snap.exists || user?.active === false) {
-    throw new HttpsError('permission-denied', '這個帳號未被授權使用本系統。')
-  }
-  if (needsSendRole && user?.role !== 'admin' && user?.role !== 'manager') {
-    throw new HttpsError('permission-denied', '你的角色沒有正式發送權限。')
-  }
-  return { email: email.toLowerCase(), ...user } as {
-    email: string
-    displayName?: string
-    role?: string
-  }
+/**
+ * 所有 callable 共用的授權檢查。Admin SDK 會略過 Firestore 規則，
+ * 所以這裡必須自行做完整判斷，否則規則擋得住的情境會從 Functions 繞過去。
+ */
+async function authorize(
+  auth: CallableAuth,
+  needsSendRole: boolean,
+): Promise<AuthorizedUser> {
+  const email = auth?.token?.email?.toLowerCase()
+  const snap = email ? await db.collection('users').doc(email).get() : undefined
+  const verdict = evaluateAccess({
+    email,
+    emailVerified: auth?.token?.email_verified,
+    userDoc: snap?.exists
+      ? (snap.data() as { role?: string; active?: unknown })
+      : undefined,
+    needsSendRole,
+  })
+  if (!verdict.ok) throw new HttpsError('permission-denied', verdict.reason)
+  return { ...(snap?.data() ?? {}), email: email as string } as AuthorizedUser
 }
 
-/** 從 Storage 抓附件，轉成 nodemailer 需要的格式。 */
+/** 只有 admin 能修改系統設定。 */
+async function requireAdmin(auth: CallableAuth): Promise<AuthorizedUser> {
+  const user = await authorize(auth, false)
+  if (user.role !== 'admin') {
+    throw new HttpsError('permission-denied', '只有管理員可以執行這個動作。')
+  }
+  return user
+}
+
+/**
+ * 從 Storage 抓附件。大小與類型一律以 Storage metadata 為準，
+ * 並先確認總量再下載，避免把過大的檔案全載進記憶體導致 Function 被中止。
+ */
 async function loadAttachments(
-  files: { name: string; path: string; contentType?: string }[],
+  files: { name?: string; path?: string }[] | undefined,
+  pressReleaseId: string,
 ) {
+  const list = files ?? []
+  if (list.length === 0) return []
+  if (list.length > ATTACHMENT_LIMITS.maxCount) {
+    throw new HttpsError(
+      'failed-precondition',
+      `附件最多 ${ATTACHMENT_LIMITS.maxCount} 個，目前有 ${list.length} 個。`,
+    )
+  }
+
   const bucket = getStorage().bucket()
-  const out = []
-  for (const f of files ?? []) {
+  const mb = (n: number) => n / 1024 / 1024
+
+  // 第一輪只讀 metadata，確認路徑合法與總大小
+  const checked: {
+    path: string
+    filename: string
+    contentType: string
+  }[] = []
+  let total = 0
+  for (const f of list) {
+    if (!isAllowedAttachmentPath(f.path, pressReleaseId)) {
+      logger.error('附件路徑不在允許範圍', { path: f.path, pressReleaseId })
+      throw new HttpsError(
+        'permission-denied',
+        '附件路徑不合法，請重新上傳附件。',
+      )
+    }
+    const file = bucket.file(f.path as string)
+    let meta
     try {
-      const [buf] = await bucket.file(f.path).download()
-      out.push({
-        filename: f.name,
-        content: buf,
-        contentType: f.contentType || 'application/octet-stream',
-      })
+      ;[meta] = await file.getMetadata()
     } catch (err) {
-      logger.error('附件下載失敗', { path: f.path, err })
-      throw new HttpsError('internal', `附件「${f.name}」讀取失敗，請重新上傳。`)
+      logger.error('讀取附件 metadata 失敗', { path: f.path, err })
+      throw new HttpsError(
+        'failed-precondition',
+        `附件「${f.name ?? f.path}」已不存在，請重新上傳。`,
+      )
+    }
+    const size = Number(meta.size ?? 0)
+    if (!Number.isFinite(size) || size <= 0) {
+      throw new HttpsError('failed-precondition', '附件內容為空，請重新上傳。')
+    }
+    if (size > ATTACHMENT_LIMITS.maxFileBytes) {
+      throw new HttpsError(
+        'failed-precondition',
+        `附件「${f.name ?? ''}」超過單檔 ${mb(ATTACHMENT_LIMITS.maxFileBytes)}MB 上限。`,
+      )
+    }
+    total += size
+    if (total > ATTACHMENT_LIMITS.maxTotalBytes) {
+      throw new HttpsError(
+        'failed-precondition',
+        `附件總大小超過 ${mb(ATTACHMENT_LIMITS.maxTotalBytes)}MB 上限。`,
+      )
+    }
+    checked.push({
+      path: f.path as string,
+      // 檔名只取最後一段，避免路徑字元被塞進郵件標頭
+      filename: (f.name ?? f.path ?? 'attachment').split('/').pop() as string,
+      contentType: meta.contentType ?? 'application/octet-stream',
+    })
+  }
+
+  const out = []
+  for (const c of checked) {
+    try {
+      const [buf] = await bucket.file(c.path).download()
+      out.push({ filename: c.filename, content: buf, contentType: c.contentType })
+    } catch (err) {
+      logger.error('附件下載失敗', { path: c.path, err })
+      throw new HttpsError(
+        'internal',
+        `附件「${c.filename}」讀取失敗，請重新上傳。`,
+      )
     }
   }
   return out
@@ -224,7 +318,7 @@ export const sendCampaign = onCall<SendRequest>(
     const isTest = mode !== 'real'
 
     // 只有正式發送需要 admin / manager 權限
-    const user = await authorize(request.auth?.token?.email, mode === 'real')
+    const user = await authorize(request.auth, mode === 'real')
 
     const pressSnap = await db
       .collection('pressReleases')
@@ -320,7 +414,7 @@ export const sendCampaign = onCall<SendRequest>(
       }
     }
 
-    const attachments = await loadAttachments(press.attachments ?? [])
+    const attachments = await loadAttachments(press.attachments, pressReleaseId)
 
     const settings = await readSmtpSettings()
     const transporter = await createTransport(settings, await readSmtpPassword())
@@ -350,18 +444,34 @@ export const sendCampaign = onCall<SendRequest>(
       totals: { recipients: recipients.length, sent: 0, failed: 0 },
     })
 
-    const batch = db.batch()
-    for (const r of recipients) {
-      batch.set(campaignRef.collection('recipients').doc(r.id), {
-        contactId: r.id,
-        email: r.email,
-        name: r.name,
-        outlet: r.outlet ?? '',
-        language: r.language,
-        status: 'queued',
+    // Firestore batch 一次上限 500 筆，收件人多時要分批
+    try {
+      for (const group of chunk(recipients)) {
+        const batch = db.batch()
+        for (const r of group) {
+          batch.set(campaignRef.collection('recipients').doc(r.id), {
+            contactId: r.id,
+            email: r.email,
+            name: r.name,
+            outlet: r.outlet ?? '',
+            language: r.language,
+            status: 'queued',
+          })
+        }
+        await batch.commit()
+      }
+    } catch (err) {
+      // 不能讓 campaign 永遠停在 sending，否則畫面會一直轉圈
+      logger.error('建立收件人紀錄失敗', err)
+      await campaignRef.update({
+        status: 'failed',
+        error: `建立收件人紀錄失敗：${(err as Error).message}`,
       })
+      throw new HttpsError(
+        'internal',
+        '建立收件人紀錄失敗，尚未寄出任何信件，請稍後再試。',
+      )
     }
-    await batch.commit()
 
     let sent = 0
     let failed = 0
@@ -429,15 +539,6 @@ export const sendCampaign = onCall<SendRequest>(
   },
 )
 
-/** 只有 admin 能碰寄信設定。 */
-async function requireAdmin(email: string | undefined) {
-  const user = await authorize(email, false)
-  if (user.role !== 'admin') {
-    throw new HttpsError('permission-denied', '只有管理員可以修改寄信設定。')
-  }
-  return user
-}
-
 /** 把新密碼寫成 Secret Manager 的新版本，必要時先建立 secret。 */
 async function writeSmtpPassword(password: string) {
   const parent = `projects/${PROJECT_ID}`
@@ -470,7 +571,7 @@ interface SmtpSettingsRequest {
 /** 後台儲存寄信設定。密碼只進 Secret Manager，不寫 Firestore。 */
 export const updateSmtpSettings = onCall<SmtpSettingsRequest>(
   async (request) => {
-    const admin = await requireAdmin(request.auth?.token?.email)
+    const admin = await requireAdmin(request.auth)
     const { host, port, user, fromEmail, replyTo, password } =
       request.data ?? {}
 
@@ -519,7 +620,7 @@ export const updateSmtpSettings = onCall<SmtpSettingsRequest>(
 export const testSmtpConnection = onCall<{ sendTestEmail?: boolean }>(
   { secrets: [SMTP_PASS], timeoutSeconds: 120 },
   async (request) => {
-    const admin = await requireAdmin(request.auth?.token?.email)
+    const admin = await requireAdmin(request.auth)
     const settings = await readSmtpSettings()
     const transporter = await createTransport(settings, await readSmtpPassword())
 
@@ -595,16 +696,25 @@ function describeSmtpError(message: string): string {
  * 所以要把 users 白名單同步成 `pressCenter` claim。
  * 兩個時間點都要處理：白名單異動時、以及使用者第一次登入建立帳號時。
  */
-async function applyClaim(email: string, allowed: boolean) {
+async function applyClaim(
+  email: string,
+  allowed: boolean,
+  role?: string,
+) {
   try {
     const user = await getAuth().getUserByEmail(email)
     const current = user.customClaims ?? {}
-    if (!!current.pressCenter === allowed) return
+    const nextRole = allowed ? (role ?? null) : null
+    // Storage 規則看的是 token 裡的 role，所以白名單改角色時要同步過來
+    if (!!current.pressCenter === allowed && (current.role ?? null) === nextRole) {
+      return
+    }
     await getAuth().setCustomUserClaims(user.uid, {
       ...current,
       pressCenter: allowed,
+      role: nextRole,
     })
-    logger.info('已更新 pressCenter claim', { email, allowed })
+    logger.info('已更新 pressCenter / role claim', { email, allowed, role: nextRole })
   } catch (err) {
     // 使用者還沒登入過就沒有 Auth 帳號，等他首次登入時由 onUserCreated 補上
     if ((err as { code?: string }).code !== 'auth/user-not-found') {
@@ -619,9 +729,14 @@ export const syncUserClaims = onDocumentWritten(
   async (event) => {
     const email = event.params.email.toLowerCase()
     const after = event.data?.after?.data()
-    await applyClaim(email, !!after && after.active !== false)
+    // 與 evaluateAccess 一致：必須明確 active === true 才算啟用
+    await applyClaim(email, after?.active === true, after?.role)
   },
 )
+
+function snap_or_undefined(snap: FirebaseFirestore.DocumentSnapshot) {
+  return snap.exists ? (snap.data() as { active?: unknown; role?: string }) : undefined
+}
 
 /** 使用者首次登入建立 Auth 帳號時，依白名單決定要不要給 claim。 */
 export const onUserCreated = functionsV1
@@ -630,7 +745,69 @@ export const onUserCreated = functionsV1
   .onCreate(async (user) => {
     const email = (user.email ?? '').toLowerCase()
     if (!email) return
-    const snap = await db.collection('users').doc(email).get()
-    const allowed = snap.exists && snap.data()?.active !== false
-    await applyClaim(email, allowed)
+    const data = snap_or_undefined(await db.collection('users').doc(email).get())
+    await applyClaim(email, data?.active === true, data?.role)
   })
+
+/**
+ * 刪除活動並清掉底下的 participants 子集合。
+ *
+ * 前端只刪父文件的話，子集合會變成孤兒資料 —— Firestore 不會連帶刪除，
+ * 這些紀錄會永遠留在資料庫裡佔空間，而且日後若建了同 id 的活動還會冒出來。
+ */
+export const deleteMediaEvent = onCall<{ eventId: string }>(
+  { timeoutSeconds: 120 },
+  async (request) => {
+    await authorize(request.auth, false)
+    const eventId = request.data?.eventId
+    if (!eventId || typeof eventId !== 'string' || eventId.includes('/')) {
+      throw new HttpsError('invalid-argument', '活動 ID 不正確。')
+    }
+
+    const eventRef = db.collection('mediaEvents').doc(eventId)
+    if (!(await eventRef.get()).exists) {
+      throw new HttpsError('not-found', '找不到這場活動。')
+    }
+
+    let removed = 0
+    try {
+      // 分批刪，避免子集合筆數多時超過單一 batch 的上限
+      for (;;) {
+        const snap = await eventRef
+          .collection('participants')
+          .limit(BATCH_SIZE)
+          .get()
+        if (snap.empty) break
+        const batch = db.batch()
+        for (const d of snap.docs) batch.delete(d.ref)
+        await batch.commit()
+        removed += snap.size
+        if (snap.size < BATCH_SIZE) break
+      }
+      // 子集合清空後才刪父文件，中途失敗仍看得到活動、可以重試
+      await eventRef.delete()
+    } catch (err) {
+      logger.error('刪除活動失敗', { eventId, err })
+      throw new HttpsError(
+        'internal',
+        `刪除活動失敗：${(err as Error).message}`,
+      )
+    }
+
+    return { ok: true, participantsRemoved: removed }
+  },
+)
+
+/**
+ * 補發目前登入者的 custom claim。
+ *
+ * pressCenter / role 這兩個 claim 是由白名單異動或首次登入時寫入的。
+ * 之後若新增了 claim（例如 Storage 規則開始檢查 role），既有使用者的
+ * token 裡不會有，功能會莫名失效。前端在偵測到 claim 與白名單不一致時
+ * 呼叫這支，補完後強制刷新 token 即可，不必請每個人重新登入。
+ */
+export const refreshMyClaims = onCall(async (request) => {
+  const user = await authorize(request.auth, false)
+  await applyClaim(user.email, true, user.role)
+  return { ok: true, role: user.role ?? null }
+})

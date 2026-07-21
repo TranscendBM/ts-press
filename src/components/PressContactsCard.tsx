@@ -6,7 +6,7 @@ import { uploadBrandingFile } from '../lib/storage'
 import { DEFAULT_UI_LOGO } from '../lib/useBranding'
 import { Button, Field, TextArea, TextInput } from './ui'
 import { LANGUAGES, LANGUAGE_LABELS, type Language } from '../constants'
-import { DEFAULT_ABOUT, DEFAULT_EMAIL_LOGO } from '../lib/emailTemplate'
+import { DEFAULT_ABOUT, DEFAULT_EMAIL_LOGO } from '../../shared/emailTemplate'
 import type { AboutBlock, EmailSettings, PressContact } from '../types'
 
 const BLANK: PressContact = { name: '', company: '', email: '', phone: '' }

@@ -3,27 +3,67 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
 
-    // Storage 規則讀不到 Firestore，所以改用 custom claim。
-    // 這個 claim 由 functions 的 syncUserClaims / onUserCreated 依 users 白名單寫入。
+    // Storage 規則讀不到 Firestore，只能看 token 裡的 custom claim。
+    // pressCenter 與 role 由 functions 的 syncUserClaims / onUserCreated
+    // 依 users 白名單寫入，與 firestore.rules 的 isWhitelisted() 對應。
     function isPressCenterUser() {
       return request.auth != null
         && request.auth.token.email_verified == true
         && request.auth.token.pressCenter == true;
     }
 
-    // 信件頁首 logo 等品牌素材
-    match /branding/{allPaths=**} {
-      allow read: if isPressCenterUser();
-      allow write: if isPressCenterUser()
-        && request.resource.size < 2 * 1024 * 1024;
+    function isAdmin() {
+      return isPressCenterUser() && request.auth.token.role == 'admin';
     }
 
-    // 新聞稿的內嵌圖與附件
-    match /press/{pressId}/{allPaths=**} {
+    function isImage() {
+      return request.resource.contentType.matches('image/(png|jpeg|gif|webp)');
+    }
+
+    // 郵件附件允許圖片與常見文件格式
+    function isAllowedAttachment() {
+      return isImage()
+        || request.resource.contentType.matches('application/pdf')
+        || request.resource.contentType.matches(
+             'application/(msword|vnd[.]openxmlformats-officedocument[.].*)');
+    }
+
+    function underSize(maxBytes) {
+      return request.resource.size > 0 && request.resource.size < maxBytes;
+    }
+
+    // 品牌素材（信件與介面的 logo）：只有管理員能改。
+    // 刻意把三種操作分開 —— delete 時沒有 request.resource，
+    // 若在 delete 條件裡檢查 size 會因為存取 null 而永遠失敗。
+    match /branding/{fileName} {
       allow read: if isPressCenterUser();
-      // 單檔 10MB 上限
-      allow write: if isPressCenterUser()
-        && request.resource.size < 10 * 1024 * 1024;
+      allow create, update: if isAdmin()
+        && isImage()
+        && underSize(2 * 1024 * 1024);
+      allow delete: if isAdmin();
+    }
+
+    // 新聞稿內文圖片：白名單使用者皆可維護
+    match /press/{pressId}/hero/{fileName} {
+      allow read: if isPressCenterUser();
+      allow create, update: if isPressCenterUser()
+        && isImage()
+        && underSize(10 * 1024 * 1024);
+      allow delete: if isPressCenterUser();
+    }
+
+    // 郵件附件。sendCampaign 只會讀這個路徑底下的檔案。
+    match /press/{pressId}/attachments/{fileName} {
+      allow read: if isPressCenterUser();
+      allow create, update: if isPressCenterUser()
+        && isAllowedAttachment()
+        && underSize(10 * 1024 * 1024);
+      allow delete: if isPressCenterUser();
+    }
+
+    // 其他路徑一律拒絕，避免將來新增目錄時默默沿用寬鬆規則
+    match /{allPaths=**} {
+      allow read, write: if false;
     }
   }
 }

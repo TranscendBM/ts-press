@@ -102,6 +102,18 @@ export const DEFAULT_ABOUT: Record<
   us: { text: COPY.us.about, link: COPY.us.aboutLink },
 }
 
+/**
+ * 只允許 http/https/mailto 的絕對網址，其餘（javascript:、data: 等）一律丟掉。
+ * 這些值來自後台設定與使用者輸入，直接塞進 href/src 會變成注入點。
+ */
+export function safeUrl(url: string | undefined): string {
+  const raw = (url ?? '').trim()
+  if (!raw) return ''
+  if (!/^(https?:|mailto:)/i.test(raw)) return ''
+  // 引號與角括號會提前結束屬性，一律編碼
+  return raw.replace(/&/g, '&amp;').replace(/"/g, '%22').replace(/</g, '%3C').replace(/>/g, '%3E')
+}
+
 export function escapeHtml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
@@ -126,10 +138,11 @@ export function formatReleaseDate(
 }
 
 const linkify = (s: string) =>
-  s.replace(
-    /(https?:\/\/[^\s<]+)/g,
-    `<a href="$1" style="color:${BRAND_COLOR};text-decoration:underline;">$1</a>`,
-  )
+  s.replace(/(https?:\/\/[^\s<]+)/g, (match) => {
+    const href = safeUrl(match)
+    if (!href) return match
+    return `<a href="${href}" style="color:${BRAND_COLOR};text-decoration:underline;">${match}</a>`
+  })
 
 /**
  * 把純文字切成區塊。空行分段；以 `## ` 開頭的行視為小標題。
@@ -169,10 +182,11 @@ export function renderEmailHtml(input: TemplateInput): string {
   // 圖片置中插在開頭段落之後：讀者先讀完導言、正要往下時看到產品圖。
   // 不用兩欄並排 —— 260px 圖擠在 600px 版面裡會讓文字欄只剩 320px，
   // 而且兩欄表格在手機上不會自動堆疊。
-  const image = input.heroImageUrl
+  const heroSrc = safeUrl(input.heroImageUrl)
+  const image = heroSrc
     ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 24px;">
          <tr><td align="center">
-           <img src="${input.heroImageUrl}" alt="" width="260"
+           <img src="${heroSrc}" alt="" width="260"
                 style="display:block;width:260px;max-width:100%;height:auto;border:0;border-radius:4px;">
          </td></tr>
        </table>`
@@ -191,7 +205,7 @@ export function renderEmailHtml(input: TemplateInput): string {
            ${escapeHtml(c.name)}${c.company ? ` · ${escapeHtml(c.company)}` : ''}<br>
            ${
              c.email
-               ? `<a href="mailto:${escapeHtml(c.email)}" style="color:${BRAND_COLOR};text-decoration:none;">${escapeHtml(
+               ? `<a href="${safeUrl(`mailto:${c.email}`)}" style="color:${BRAND_COLOR};text-decoration:none;">${escapeHtml(
                    c.email,
                  )}</a>`
                : ''
@@ -218,7 +232,7 @@ export function renderEmailHtml(input: TemplateInput): string {
 
       <!-- 頁首 -->
       <tr><td style="background-color:${BRAND_COLOR};padding:18px 32px;">
-        <img src="${escapeHtml(logoUrl)}" alt="TRANSCEND" height="26"
+        <img src="${safeUrl(logoUrl)}" alt="TRANSCEND" height="26"
              style="display:block;height:26px;width:auto;border:0;">
       </td></tr>
 
@@ -255,7 +269,7 @@ export function renderEmailHtml(input: TemplateInput): string {
         )}</p>
         <p style="margin:0;font-size:12px;line-height:1.7;color:#8a919e;font-family:${font};">
           ${escapeHtml(aboutText).replace(/\n/g, '<br>')}
-          <a href="${escapeHtml(aboutLink)}" style="color:${BRAND_COLOR};text-decoration:none;">${escapeHtml(
+          <a href="${safeUrl(aboutLink)}" style="color:${BRAND_COLOR};text-decoration:none;">${escapeHtml(
             aboutLink,
           )}</a>
         </p>
@@ -267,9 +281,7 @@ export function renderEmailHtml(input: TemplateInput): string {
           &copy; Transcend Information, Inc. All Rights Reserved.
         </p>
         <p style="margin:4px 0 0;font-size:11px;line-height:1.6;color:rgba(255,255,255,0.75);font-family:${font};">
-          ${escapeHtml(copy.unsubscribe)}<a href="mailto:${escapeHtml(
-            unsubscribeEmail,
-          )}" style="color:#ffffff;text-decoration:underline;">${escapeHtml(
+          ${escapeHtml(copy.unsubscribe)}<a href="${safeUrl(`mailto:${unsubscribeEmail}`)}" style="color:#ffffff;text-decoration:underline;">${escapeHtml(
             unsubscribeEmail,
           )}</a>${escapeHtml(copy.unsubscribeSuffix)}
         </p>

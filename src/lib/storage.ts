@@ -45,10 +45,32 @@ export async function uploadBrandingFile(file: File): Promise<StoredFile> {
   }
 }
 
+/**
+ * 刪除 Storage 檔案。
+ *
+ * 只有「檔案本來就不存在」可以忽略——那代表目標狀態已經達成。
+ * 權限不足、網路中斷等都必須往外拋，否則畫面會顯示刪除成功、
+ * 檔案卻還留在 bucket 裡，使用者無從察覺。
+ */
 export async function deletePressFile(path: string): Promise<void> {
   try {
     await deleteObject(ref(storage, path))
-  } catch {
-    // 檔案可能已被刪除，忽略即可
+  } catch (err) {
+    const code = (err as { code?: string }).code
+    if (code === 'storage/object-not-found') return
+    throw err
   }
+}
+
+/** 把 Storage 錯誤翻成使用者看得懂的訊息。 */
+export function describeStorageError(err: unknown): string {
+  const code = (err as { code?: string }).code
+  if (code === 'storage/unauthorized') {
+    return '沒有權限操作這個檔案，請確認帳號權限。'
+  }
+  if (code === 'storage/retry-limit-exceeded' || code === 'storage/canceled') {
+    return '網路連線不穩定，請稍後再試。'
+  }
+  if (code === 'storage/quota-exceeded') return '儲存空間已滿，請聯絡管理員。'
+  return (err as Error)?.message ?? '檔案操作失敗。'
 }
