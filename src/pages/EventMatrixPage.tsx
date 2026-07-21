@@ -7,7 +7,8 @@ import { Badge, Button, Select } from '../components/ui'
 import {
   EVENT_TYPES,
   EVENT_TYPE_LABELS,
-  GIFT_TYPES,
+  isGiftType,
+  normalizeEventType,
   LISTS,
   LIST_LABELS,
   type EventType,
@@ -27,7 +28,7 @@ export default function EventMatrixPage() {
   const [contacts, setContacts] = useState<MediaContact[]>([])
   const [records, setRecords] = useState<Records>({})
   const [loading, setLoading] = useState(true)
-  const [type, setType] = useState<EventType | 'all'>('gift_midautumn')
+  const [type, setType] = useState<EventType | 'all'>('gift_seasonal')
   const [listFilter, setListFilter] = useState<ListId | 'all'>('tw_pr')
   const [onlyMarked, setOnlyMarked] = useState(false)
 
@@ -67,7 +68,7 @@ export default function EventMatrixPage() {
   const columns = useMemo(
     () =>
       events
-        .filter((e) => type === 'all' || e.type === type)
+        .filter((e) => type === 'all' || normalizeEventType(e.type) === type)
         .sort((a, b) => (a.date ?? '').localeCompare(b.date ?? '')),
     [events, type],
   )
@@ -116,7 +117,7 @@ export default function EventMatrixPage() {
     URL.revokeObjectURL(a.href)
   }
 
-  const isGift = type !== 'all' && GIFT_TYPES.includes(type)
+  const isGift = type !== 'all' && isGiftType(type)
 
   return (
     <>

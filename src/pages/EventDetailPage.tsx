@@ -24,7 +24,8 @@ import {
   EVENT_TYPES,
   EVENT_TYPE_LABELS,
   eventTypeLabel,
-  GIFT_TYPES,
+  normalizeEventType,
+  isGiftType,
   LISTS,
   LIST_LABELS,
   type EventType,
@@ -82,7 +83,7 @@ export default function EventDetailPage() {
     }
   }, [id])
 
-  const isGift = event ? GIFT_TYPES.includes(event.type) : false
+  const isGift = isGiftType(event?.type)
   const actionLabel = isGift ? '已致贈' : '出席'
 
   const visible = useMemo(() => {
@@ -107,7 +108,7 @@ export default function EventDetailPage() {
     setForm({
       name: event.name,
       // 舊資料可能存著已移除的類型（例如媒體茶會），下拉沒有對應選項會顯示空白
-      type: EVENT_TYPES.includes(event.type) ? event.type : 'other',
+      type: normalizeEventType(event.type),
       date: event.date,
       note: event.note ?? '',
     })

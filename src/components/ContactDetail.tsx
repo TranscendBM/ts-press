@@ -5,7 +5,7 @@ import { db } from '../lib/firebase'
 import { Badge, Button, Modal } from './ui'
 import {
   eventTypeLabel,
-  GIFT_TYPES,
+  isGiftType,
   LIST_LABELS,
   MEDIA_TYPE_LABELS,
 } from '../constants'
@@ -165,12 +165,12 @@ export default function ContactDetail({
                 <div key={event.id} className="flex items-start gap-3 p-3">
                   <div
                     className={`mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md ${
-                      GIFT_TYPES.includes(event.type)
+                      isGiftType(event.type)
                         ? 'bg-amber-50 text-amber-600'
                         : 'bg-brand-50 text-brand-600'
                     }`}
                   >
-                    {GIFT_TYPES.includes(event.type) ? (
+                    {isGiftType(event.type) ? (
                       <Gift className="size-4" />
                     ) : (
                       <Users className="size-4" />

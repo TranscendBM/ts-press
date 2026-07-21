@@ -26,7 +26,7 @@ import {
   EVENT_TYPES,
   EVENT_TYPE_LABELS,
   eventTypeLabel,
-  GIFT_TYPES,
+  isGiftType,
   type EventType,
 } from '../constants'
 import { LayoutGrid } from 'lucide-react'
@@ -174,7 +174,7 @@ export default function EventsPage() {
         ) : (
           <div className="grid gap-3">
             {visible.map((item) => {
-              const isGift = GIFT_TYPES.includes(item.type)
+              const isGift = isGiftType(item.type)
               return (
                 <div
                   key={item.id}

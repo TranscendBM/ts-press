@@ -150,8 +150,7 @@ export function lookupMediaTier(outlet: string) {
 /** 媒體關係經營的活動類型。 */
 export const EVENT_TYPES = [
   'meal',
-  'gift_dragonboat',
-  'gift_midautumn',
+  'gift_seasonal',
   'gift_other',
   'other',
 ] as const
@@ -159,27 +158,38 @@ export type EventType = (typeof EVENT_TYPES)[number]
 
 export const EVENT_TYPE_LABELS: Record<EventType, string> = {
   meal: '媒體餐敘',
-  gift_dragonboat: '端午禮品',
-  gift_midautumn: '中秋禮品',
+  gift_seasonal: '年節禮品',
   gift_other: '其他禮品',
   other: '其他活動',
 }
 
 /**
- * 取得活動類型的顯示名稱。
- * 舊資料可能存著已移除的類型（例如先前的媒體茶會），
- * 直接查表會得到 undefined 而顯示空白，因此一律退回「其他活動」。
+ * 已停用的類型對應到現行類型。
+ * 端午與中秋合併成「年節禮品」，媒體茶會歸入「其他活動」。
+ * 既有紀錄不必改資料庫，讀取時轉換即可。
  */
+const LEGACY_EVENT_TYPES: Record<string, EventType> = {
+  gift_dragonboat: 'gift_seasonal',
+  gift_midautumn: 'gift_seasonal',
+  tea: 'other',
+}
+
+/** 把資料庫裡的類型轉成現行類型，未知值一律視為「其他活動」。 */
+export function normalizeEventType(type: string | undefined): EventType {
+  if (EVENT_TYPES.includes(type as EventType)) return type as EventType
+  return LEGACY_EVENT_TYPES[type ?? ''] ?? 'other'
+}
+
 export function eventTypeLabel(type: string | undefined): string {
-  return EVENT_TYPE_LABELS[type as EventType] ?? EVENT_TYPE_LABELS.other
+  return EVENT_TYPE_LABELS[normalizeEventType(type)]
 }
 
 /** 送禮類活動用「贈送」而非「出席」，介面文案要跟著換。 */
-export const GIFT_TYPES: EventType[] = [
-  'gift_dragonboat',
-  'gift_midautumn',
-  'gift_other',
-]
+export const GIFT_TYPES: EventType[] = ['gift_seasonal', 'gift_other']
+
+export function isGiftType(type: string | undefined): boolean {
+  return GIFT_TYPES.includes(normalizeEventType(type))
+}
 
 /** 使用者角色。admin 與 manager 可按下正式發送。 */
 export const ROLES = ['admin', 'manager', 'editor'] as const
