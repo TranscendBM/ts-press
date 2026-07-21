@@ -4,7 +4,7 @@ import { CalendarDays, Gift, Mail, Phone, Star, Users } from 'lucide-react'
 import { db } from '../lib/firebase'
 import { Badge, Button, Modal } from './ui'
 import {
-  EVENT_TYPE_LABELS,
+  eventTypeLabel,
   GIFT_TYPES,
   LIST_LABELS,
   MEDIA_TYPE_LABELS,
@@ -181,7 +181,7 @@ export default function ContactDetail({
                       {event.name}
                     </div>
                     <div className="mt-0.5 text-xs text-slate-400">
-                      {EVENT_TYPE_LABELS[event.type]} · {event.date}
+                      {eventTypeLabel(event.type)} · {event.date}
                       {record.attended ? ' · 已標記' : ''}
                     </div>
                     {record.note && (

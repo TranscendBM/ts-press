@@ -25,6 +25,7 @@ import {
 import {
   EVENT_TYPES,
   EVENT_TYPE_LABELS,
+  eventTypeLabel,
   GIFT_TYPES,
   type EventType,
 } from '../constants'
@@ -199,7 +200,7 @@ export default function EventsPage() {
                     </div>
                     <div className="mt-1 flex items-center gap-2 text-xs text-slate-400">
                       <Badge tone={isGift ? 'amber' : 'blue'}>
-                        {EVENT_TYPE_LABELS[item.type]}
+                        {eventTypeLabel(item.type)}
                       </Badge>
                       <span className="flex items-center gap-1">
                         <CalendarDays className="size-3.5" />

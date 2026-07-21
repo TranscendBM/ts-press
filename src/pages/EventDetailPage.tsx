@@ -13,7 +13,7 @@ import { db } from '../lib/firebase'
 import PageHeader from '../components/PageHeader'
 import { Button, Select, TextInput } from '../components/ui'
 import {
-  EVENT_TYPE_LABELS,
+  eventTypeLabel,
   GIFT_TYPES,
   LISTS,
   LIST_LABELS,
@@ -133,7 +133,7 @@ export default function EventDetailPage() {
     <>
       <PageHeader
         title={event.name}
-        description={`${EVENT_TYPE_LABELS[event.type]} · ${event.date} · 已標記 ${markedCount} 位`}
+        description={`${eventTypeLabel(event.type)} · ${event.date} · 已標記 ${markedCount} 位`}
         actions={
           <>
             <Button onClick={() => navigate('/events')}>
