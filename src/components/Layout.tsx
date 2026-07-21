@@ -32,7 +32,7 @@ const NAV = [
 
 export default function Layout() {
   const { appUser, logout, isAdmin, can } = useAuth()
-  const { uiLogoUrl } = useBranding()
+  const { logoUrl: uiLogoUrl } = useBranding()
 
   return (
     <div className="flex min-h-screen">

@@ -37,10 +37,11 @@ export default function PressContactsCard() {
   const [uiLogoUrl, setUiLogoUrl] = useState('')
   const [savedUiLogo, setSavedUiLogo] = useState('')
 
-  // 介面 logo 放在公開可讀的 settings/branding，登入頁在驗證前就要顯示
+  // 介面 logo 放在 settings/branding。⚠️ 該文件公開可讀（登入頁在驗證前
+  // 就要顯示 logo），只能放可公開的圖片網址，不得寫入任何機密資訊。
   useEffect(() => {
     return onSnapshot(doc(db, 'settings', 'branding'), (snap) => {
-      const url = (snap.data()?.uiLogoUrl as string) ?? ''
+      const url = (snap.data()?.logoUrl as string) ?? ''
       setSavedUiLogo(url)
       setUiLogoUrl(url)
     })
@@ -107,7 +108,8 @@ export default function PressContactsCard() {
         ),
         setDoc(
           doc(db, 'settings', 'branding'),
-          { uiLogoUrl: uiLogoUrl.trim(), updatedAt: serverTimestamp() },
+          // 欄位需與 firestore.rules 的白名單一致，多寫欄位會被整筆拒絕
+          { logoUrl: uiLogoUrl.trim(), updatedAt: serverTimestamp() },
           { merge: true },
         ),
       ])

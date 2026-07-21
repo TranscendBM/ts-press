@@ -5,7 +5,7 @@ import { useBranding } from '../lib/useBranding'
 
 export default function LoginPage() {
   const { signIn, denial } = useAuth()
-  const { uiLogoUrl } = useBranding()
+  const { logoUrl: uiLogoUrl } = useBranding()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 

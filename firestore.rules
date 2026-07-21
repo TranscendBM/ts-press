@@ -102,11 +102,31 @@ service cloud.firestore {
         && noPrivilegeEscalation(request.resource.data.roles);
     }
 
-    // 系統介面的 logo。登入頁在通過驗證前就要顯示，所以必須公開可讀；
-    // 內容只有一個圖片網址，沒有機密資訊。
+    /**
+     * ⚠️ 這份文件的全部內容都是公開資訊 ⚠️
+     *
+     * 登入頁在通過驗證前就要顯示 logo，所以 read 必須對所有人開放
+     * （包含未登入者、搜尋引擎、任何拿到專案 ID 的人）。
+     *
+     * 因此這裡**絕對不可以**存放任何機密或內部設定：
+     * 不放密碼、API 金鑰、內部主機位址、員工名單、任何未公開的資訊。
+     * 欄位以白名單限制，新增欄位前請先確認該內容可以公開。
+     */
+    function isPublicHttpsUrl(v) {
+      return v is string
+        && v.size() > 0
+        && v.size() <= 500
+        && v.matches('^https://[^\\s]+$');
+    }
+
     match /settings/branding {
       allow read: if true;
-      allow write: if isAdmin();
+      // 只收 logoUrl 與 updatedAt，多一個欄位就整筆拒絕
+      allow write: if isAdmin()
+        && request.resource.data.keys().hasOnly(['logoUrl', 'updatedAt'])
+        && (!('logoUrl' in request.resource.data)
+            || request.resource.data.logoUrl == ''
+            || isPublicHttpsUrl(request.resource.data.logoUrl));
     }
 
     // 媒體名單：白名單使用者皆可維護

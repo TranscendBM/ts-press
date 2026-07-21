@@ -356,6 +356,124 @@ describe.skipIf(!available)('firestore.rules — users 白名單', () => {
   })
 })
 
+describe.skipIf(!available)('firestore.rules — settings/branding（公開文件）', () => {
+  let env: RulesTestEnvironment
+
+  beforeAll(async () => {
+    env = await initializeTestEnvironment({
+      projectId: 'ts-press-fs-rules-branding',
+      firestore: {
+        rules: readFileSync('firestore.rules', 'utf8'),
+        host: HOST,
+        port: PORT,
+      },
+    })
+  })
+
+  afterAll(async () => env?.cleanup())
+
+  beforeEach(async () => {
+    await env.clearFirestore()
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore()
+      await setDoc(doc(db, 'users', 'admin@x.com'), {
+        email: 'admin@x.com',
+        role: 'admin',
+        active: true,
+      })
+      await setDoc(doc(db, 'users', 'spec@x.com'), {
+        email: 'spec@x.com',
+        role: 'specialist',
+        active: true,
+      })
+      await setDoc(doc(db, 'settings', 'branding'), {
+        logoUrl: 'https://cdn.example.com/logo.png',
+      })
+    })
+  })
+
+  const as = (email: string) =>
+    env.authenticatedContext(email, { email, email_verified: true }).firestore()
+  const anon = () => env.unauthenticatedContext().firestore()
+  const ref = (db: Firestore) => doc(db, 'settings', 'branding')
+
+  it('未登入可以讀（登入頁在驗證前就要顯示 logo）', async () => {
+    await assertSucceeds(getDoc(ref(anon())))
+  })
+
+  it('未登入不可寫', async () => {
+    await assertFails(
+      setDoc(ref(anon()), { logoUrl: 'https://evil.com/x.png' }),
+    )
+  })
+
+  it('非 admin 不可寫', async () => {
+    await assertFails(
+      setDoc(ref(as('spec@x.com')), { logoUrl: 'https://a.com/x.png' }),
+    )
+  })
+
+  it('admin 可以寫入合法資料', async () => {
+    await assertSucceeds(
+      setDoc(ref(as('admin@x.com')), {
+        logoUrl: 'https://a.com/x.png',
+        updatedAt: new Date(),
+      }),
+    )
+  })
+
+  it('允許清空 logoUrl 回到內建預設', async () => {
+    await assertSucceeds(setDoc(ref(as('admin@x.com')), { logoUrl: '' }))
+  })
+
+  it('拒絕多出來的欄位', async () => {
+    await assertFails(
+      setDoc(ref(as('admin@x.com')), {
+        logoUrl: 'https://a.com/x.png',
+        smtpPassword: 'secret',
+      }),
+    )
+    await assertFails(
+      setDoc(ref(as('admin@x.com')), {
+        logoUrl: 'https://a.com/x.png',
+        internalHost: '10.0.0.150',
+      }),
+    )
+  })
+
+  it('拒絕非 https 的網址', async () => {
+    for (const url of [
+      'http://a.com/x.png',
+      'javascript:alert(1)',
+      'data:image/png;base64,AAAA',
+      'ftp://a.com/x.png',
+      '//a.com/x.png',
+    ]) {
+      await assertFails(setDoc(ref(as('admin@x.com')), { logoUrl: url }))
+    }
+  })
+
+  it('拒絕 logoUrl 型別錯誤', async () => {
+    for (const v of [123, true, null, ['https://a.com']]) {
+      await assertFails(setDoc(ref(as('admin@x.com')), { logoUrl: v }))
+    }
+  })
+
+  it('拒絕過長的網址', async () => {
+    await assertFails(
+      setDoc(ref(as('admin@x.com')), {
+        logoUrl: 'https://a.com/' + 'x'.repeat(600),
+      }),
+    )
+  })
+
+  it('拒絕含空白的網址', async () => {
+    await assertFails(
+      setDoc(ref(as('admin@x.com')), { logoUrl: 'https://a.com/a b.png' }),
+    )
+  })
+})
+
 describe.skipIf(available)('firestore.rules（略過）', () => {
   it('需要 Firebase 模擬器，請先執行 npx firebase emulators:start --only firestore', () => {
     expect(available).toBe(false)

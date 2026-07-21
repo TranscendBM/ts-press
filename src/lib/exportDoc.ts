@@ -8,6 +8,9 @@ import {
   ImageRun,
   Packer,
   Paragraph,
+  Tab,
+  TabStopPosition,
+  TabStopType,
   TextRun,
 } from 'docx'
 import {
@@ -41,6 +44,9 @@ const BRAND_HEX = BRAND_COLOR.replace('#', '')
  * 信件是紅底所以用白色版，但文件是白底，必須換成紅色版才看得見。
  */
 const DOC_LOGO = new URL('/logo-dark.png', window.location.origin).href
+
+/** logo 與頁首底線之間的距離。0.3cm ÷ 2.54 × 72 ≒ 8.5 點。 */
+const BORDER_SPACE_PT = 9
 
 /**
  * 中文用微軟正黑體、英文用 Arial。
@@ -251,29 +257,42 @@ export async function downloadWord(input: TemplateInput, filename: string) {
   // 不用品牌色底 —— 轉存 PDF 時瀏覽器預設不列印背景色，
   // 白色 logo 會直接融進白底而看不見。紅色 logo 配白底則兩者都正常。
   const logo = await loadImage(DOC_LOGO)
+  const headerLabel = input.language === 'tw' ? '新聞稿' : 'Press Release'
   const headerChildren = [
     new Paragraph({
-      spacing: { before: 40, after: 80 },
+      spacing: { before: 40 },
       border: {
-        bottom: { style: BorderStyle.SINGLE, size: 12, color: BRAND_HEX },
+        bottom: {
+          style: BorderStyle.SINGLE,
+          size: 12,
+          color: BRAND_HEX,
+          // docx 的框線間距單位是點：0.3cm ≒ 8.5pt
+          space: BORDER_SPACE_PT,
+        },
       },
-      children: logo
-        ? [
-            new ImageRun({
+      // 靠右的定位點讓「新聞稿」與 logo 排在同一行的兩端
+      tabStops: [{ type: TabStopType.RIGHT, position: TabStopPosition.MAX }],
+      children: [
+        logo
+          ? new ImageRun({
               type: logo.info.format,
               data: logo.data,
               transformation: scaleToWidth(logo.info, 120),
-            }),
-          ]
-        : [
-            new TextRun({
+            })
+          : new TextRun({
               text: 'TRANSCEND',
               bold: true,
               color: BRAND_HEX,
               size: 24,
               font: FONTS,
             }),
-          ],
+        new TextRun({
+          children: [new Tab(), headerLabel],
+          color: '8A919E',
+          size: 18,
+          font: FONTS,
+        }),
+      ],
     }),
   ]
 

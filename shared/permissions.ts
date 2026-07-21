@@ -188,3 +188,101 @@ export function validateUserDoc(d: {
 
   return issues
 }
+
+// ---------------------------------------------------------------------------
+// 權限判定（可注入依賴，方便測試各種讀取失敗情境）
+// ---------------------------------------------------------------------------
+
+/** 讀取 settings/permissions 的結果。讀取失敗請直接 throw。 */
+export type PermissionsSnapshot =
+  | { exists: false }
+  | { exists: true; roles: unknown }
+
+export type PermissionsReader = () => Promise<PermissionsSnapshot>
+
+export type PermissionDecision =
+  | { allowed: true }
+  | { allowed: false; reason: 'read-error' | 'invalid-document' | 'denied' }
+
+/**
+ * 檢查 roles 欄位的結構。
+ *
+ * 規則層已經擋過一次，但 Functions 走 Admin SDK 不受規則約束，
+ * 若資料是用其他管道寫進去的（例如舊版程式、手動改 Console），
+ * 這裡必須自己判斷並「拒絕」而不是默默套用預設值。
+ */
+export function isWellFormedRoles(roles: unknown): boolean {
+  if (roles === undefined || roles === null) return false
+  if (typeof roles !== 'object' || Array.isArray(roles)) return false
+
+  for (const [role, perms] of Object.entries(roles as Record<string, unknown>)) {
+    if (!(ROLES as readonly string[]).includes(role)) return false
+    if (perms === null || typeof perms !== 'object' || Array.isArray(perms)) {
+      return false
+    }
+    for (const [key, value] of Object.entries(perms as Record<string, unknown>)) {
+      if (!(PERMISSIONS as readonly string[]).includes(key)) return false
+      if (typeof value !== 'boolean') return false
+    }
+  }
+  return true
+}
+
+/**
+ * 判斷某個角色是否具備指定權限，並明確處理各種失敗情境。
+ *
+ * 設計原則：**任何不確定都不得放行**。
+ * - reader 拋錯（permission-denied、逾時、網路異常）→ 拒絕
+ *   若管理員剛撤銷了某權限而我們讀不到，退回預設等於把權限還給對方。
+ * - 文件不存在 → 從未設定過，套用預設矩陣（本身就是最小權限設計）
+ * - 文件存在但結構不合法 → 拒絕，不猜測要用哪些欄位
+ * - 只有明確為 true 才允許；false、缺漏、未知角色、未知權限一律拒絕
+ */
+export async function checkPermission(
+  role: string | undefined,
+  permission: Permission,
+  read: PermissionsReader,
+): Promise<PermissionDecision> {
+  if (!normalizeRole(role)) return { allowed: false, reason: 'denied' }
+  if (!(PERMISSIONS as readonly string[]).includes(permission)) {
+    return { allowed: false, reason: 'denied' }
+  }
+
+  let snapshot: PermissionsSnapshot
+  try {
+    snapshot = await read()
+  } catch {
+    return { allowed: false, reason: 'read-error' }
+  }
+
+  if (!snapshot || typeof snapshot !== 'object' || !('exists' in snapshot)) {
+    return { allowed: false, reason: 'invalid-document' }
+  }
+
+  let overrides: Record<string, Partial<RolePermissions>> | undefined
+  if (snapshot.exists) {
+    if (!isWellFormedRoles(snapshot.roles)) {
+      return { allowed: false, reason: 'invalid-document' }
+    }
+    overrides = snapshot.roles as Record<string, Partial<RolePermissions>>
+  }
+
+  return hasPermission(role, permission, overrides)
+    ? { allowed: true }
+    : { allowed: false, reason: 'denied' }
+}
+
+/** 把判定結果轉成給使用者看的說明。 */
+export function describeDecision(
+  decision: PermissionDecision,
+  permission: Permission,
+): string {
+  if (decision.allowed) return ''
+  if (decision.reason === 'read-error') {
+    return '無法讀取權限設定，為安全起見已中止操作，請稍後再試。'
+  }
+  if (decision.reason === 'invalid-document') {
+    return '權限設定的資料格式不正確，已中止操作，請聯絡管理員檢查系統設定。'
+  }
+  return `你的角色沒有「${PERMISSION_LABELS[permission]}」的權限。`
+}

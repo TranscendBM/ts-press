@@ -18,10 +18,12 @@ import {
   type PressContact,
 } from './emailTemplate.generated'
 import {
-  hasPermission,
+  checkPermission,
+  describeDecision,
   normalizeRole,
   type Permission,
-  type RolePermissions,
+  type PermissionsReader,
+  type PermissionsSnapshot,
 } from './permissions.generated'
 import {
   ATTACHMENT_LIMITS,
@@ -214,44 +216,42 @@ async function authorize(
 }
 
 /**
- * 讀取後台的權限覆寫設定。
+ * 正式環境的權限讀取器。
  *
- * 「文件不存在」與「讀取失敗」必須分開處理：
- * - 不存在 → 從未設定過，用預設矩陣是正確行為
- * - 讀取失敗 → 可能管理員已撤銷某角色的權限但我們讀不到，
- *   此時退回預設等於把撤銷掉的權限還給對方（fail open），必須直接拒絕。
+ * 只負責取資料，把「讀不到怎麼辦」的決策留給 checkPermission ——
+ * 這樣測試才能注入各種失敗情境而不必碰到真正的 Firestore。
  */
-async function readPermissionOverrides(): Promise<
-  Record<string, Partial<RolePermissions>> | undefined
-> {
-  try {
-    const snap = await db.doc('settings/permissions').get()
-    return snap.exists
-      ? (snap.data()?.roles as Record<string, Partial<RolePermissions>>)
-      : undefined
-  } catch (err) {
-    logger.error('讀取權限設定失敗，拒絕本次操作', err)
-    throw new HttpsError(
-      'unavailable',
-      '無法讀取權限設定，為安全起見已中止操作，請稍後再試。',
-    )
-  }
+const firestorePermissionsReader: PermissionsReader = async () => {
+  const snap = await db.doc('settings/permissions').get()
+  const result: PermissionsSnapshot = snap.exists
+    ? { exists: true, roles: snap.data()?.roles }
+    : { exists: false }
+  return result
 }
 
 /**
  * 依權限矩陣把關。前端會隱藏沒有權限的按鈕，
  * 但真正的攔截一定要在這裡 —— 前端可被繞過。
+ *
+ * 注意：permission 由呼叫端在程式碼中寫死，絕不採用 client 傳入的值。
  */
 async function requirePermission(
   auth: CallableAuth,
   permission: Permission,
+  read: PermissionsReader = firestorePermissionsReader,
 ): Promise<AuthorizedUser> {
   const user = await authorize(auth, false)
-  const overrides = await readPermissionOverrides()
-  if (!hasPermission(user.role, permission, overrides)) {
+  const decision = await checkPermission(user.role, permission, read)
+  if (!decision.allowed) {
+    logger.warn('權限不足', {
+      email: user.email,
+      role: user.role,
+      permission,
+      reason: decision.reason,
+    })
     throw new HttpsError(
-      'permission-denied',
-      `你的角色沒有「${permission}」權限。`,
+      decision.reason === 'read-error' ? 'unavailable' : 'permission-denied',
+      describeDecision(decision, permission),
     )
   }
   return user
@@ -811,7 +811,7 @@ export const onUserCreated = functionsV1
 export const deleteMediaEvent = onCall<{ eventId: string }>(
   { timeoutSeconds: 120 },
   async (request) => {
-    await authorize(request.auth, false)
+    await requirePermission(request.auth, 'manageEvents')
     const eventId = request.data?.eventId
     if (!eventId || typeof eventId !== 'string' || eventId.includes('/')) {
       throw new HttpsError('invalid-argument', '活動 ID 不正確。')
