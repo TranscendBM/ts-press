@@ -35,10 +35,16 @@ const refreshMyClaims = httpsCallable<void, { ok: boolean; role: string | null }
 )
 
 /** token 的 claim 與白名單不符時補發，並強制刷新 token。 */
-async function syncClaimsIfStale(user: User, expectedRole: string | undefined) {
+async function syncClaimsIfStale(user: User, rawRole: string | undefined) {
   try {
+    // 後端寫入 claim 時會做正規化，這裡也要正規化後再比對，
+    // 否則舊的 editor 帳號永遠比不相等，每次登入都白跑一次補發。
+    const expectedRole = normalizeRole(rawRole) ?? null
     const token = await user.getIdTokenResult()
-    if (token.claims.pressCenter === true && token.claims.role === expectedRole) {
+    if (
+      token.claims.pressCenter === true &&
+      (token.claims.role ?? null) === expectedRole
+    ) {
       return
     }
     await refreshMyClaims()
