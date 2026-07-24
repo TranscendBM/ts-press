@@ -14,6 +14,7 @@ import {
   ArchiveRestore,
   FileText,
   Plus,
+  Send,
   Trash2,
 } from 'lucide-react'
 import { db } from '../lib/firebase'
@@ -80,7 +81,9 @@ export default function PressListPage() {
     [items, category, year],
   )
 
-  const active = visible.filter((i) => !i.archived)
+  // 封存優先，其餘再依是否已發送分成草稿與已發送兩組
+  const drafts = visible.filter((i) => !i.archived && i.status !== 'sent')
+  const sent = visible.filter((i) => !i.archived && i.status === 'sent')
   const archived = visible.filter((i) => i.archived)
 
   async function createDraft() {
@@ -250,16 +253,26 @@ export default function PressListPage() {
           <div className="space-y-8">
             <section>
               <h2 className="mb-3 text-xs font-semibold tracking-wide text-slate-500 uppercase">
-                進行中（{active.length}）
+                進行中（{drafts.length}）
               </h2>
-              {active.length === 0 ? (
+              {drafts.length === 0 ? (
                 <p className="rounded-xl border border-dashed border-slate-300 bg-white py-8 text-center text-sm text-slate-400">
                   沒有進行中的新聞稿
                 </p>
               ) : (
-                <div className="grid gap-3">{active.map(renderRow)}</div>
+                <div className="grid gap-3">{drafts.map(renderRow)}</div>
               )}
             </section>
+
+            {sent.length > 0 && (
+              <section>
+                <h2 className="mb-3 flex items-center gap-1.5 text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                  <Send className="size-3.5" />
+                  已發送（{sent.length}）
+                </h2>
+                <div className="grid gap-3">{sent.map(renderRow)}</div>
+              </section>
+            )}
 
             {archived.length > 0 && (
               <section>
