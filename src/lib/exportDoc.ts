@@ -133,20 +133,23 @@ function textParagraph(text: string, opts: { spacing?: number } = {}) {
 export async function downloadWord(input: TemplateInput, filename: string) {
   const children: Paragraph[] = []
 
-  // 標題
+  // 標題。主旨可含手動斷行（使用者在輸入框按 Enter），每段一個 TextRun，
+  // 第二段起用 break 換行，讓 Word 呈現多行標題。
   children.push(
     new Paragraph({
       heading: HeadingLevel.HEADING_1,
       spacing: { after: 120 },
-      children: [
-        new TextRun({
-          text: input.subject,
-          bold: true,
-          size: SIZE_TITLE,
-          font: FONTS,
-          color: '12161C',
-        }),
-      ],
+      children: input.subject.split(/\r?\n/).map(
+        (line, i) =>
+          new TextRun({
+            text: line,
+            break: i > 0 ? 1 : undefined,
+            bold: true,
+            size: SIZE_TITLE,
+            font: FONTS,
+            color: '12161C',
+          }),
+      ),
     }),
   )
 
@@ -458,7 +461,7 @@ export function downloadPdf(input: TemplateInput, filename: string) {
     <img src="${DOC_LOGO}" alt="TRANSCEND">
     <span>${input.language === 'tw' ? '新聞稿' : 'Press Release'}</span>
   </header>
-  <h1>${escapeHtml(input.subject)}</h1>
+  <h1>${escapeHtml(input.subject).replace(/\r?\n/g, '<br>')}</h1>
   ${dateLine ? `<p class="date">${escapeHtml(dateLine)}</p>` : ''}
   ${blocks.join('')}
   ${contactBlock}

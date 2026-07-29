@@ -44,6 +44,9 @@ export default function PressEditPage() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
+  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null)
+  // 存最新的 save，讓自動儲存的計時器永遠呼叫到當前 render 的版本
+  const saveRef = useRef<() => Promise<boolean>>(() => Promise.resolve(false))
   const [previewOpen, setPreviewOpen] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [downloading, setDownloading] = useState(false)
@@ -108,6 +111,7 @@ export default function PressEditPage() {
         updatedAt: serverTimestamp(),
       })
       setDirty(false)
+      setLastSavedAt(new Date())
       return true
     } catch (err) {
       console.error('儲存新聞稿失敗', err)
@@ -119,6 +123,18 @@ export default function PressEditPage() {
       setSaving(false)
     }
   }
+
+  saveRef.current = save
+
+  // 自動儲存：停止編輯約 1.5 秒後自動存一次。
+  // 依賴 press，每次內容變動就重設計時器，達成「停止輸入才存」的效果。
+  useEffect(() => {
+    if (!dirty || saving) return
+    const timer = setTimeout(() => {
+      void saveRef.current()
+    }, 1500)
+    return () => clearTimeout(timer)
+  }, [press, dirty, saving])
 
   async function onHeroPick(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -234,7 +250,15 @@ export default function PressEditPage() {
     <>
       <PageHeader
         title="編輯新聞稿"
-        description={dirty ? '有尚未儲存的變更' : '所有變更已儲存'}
+        description={
+          saving
+            ? '儲存中…'
+            : dirty
+              ? '編輯中，將自動儲存…'
+              : lastSavedAt
+                ? `已自動儲存 ${lastSavedAt.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
+                : '所有變更已儲存'
+        }
         actions={
           <>
             <Button onClick={() => navigate('/press')}>
@@ -352,8 +376,12 @@ export default function PressEditPage() {
           </div>
 
           <div className="space-y-5 p-5">
-            <Field label="信件主旨">
-              <TextInput
+            <Field
+              label="信件主旨"
+              hint="按 Enter 可手動斷行；斷行只顯示在信件內文、Word、PDF 的大標題，收件匣看到的主旨仍是一行。"
+            >
+              <TextArea
+                rows={2}
                 value={version.subject}
                 onChange={(e) => patchVersion('subject', e.target.value)}
                 placeholder={

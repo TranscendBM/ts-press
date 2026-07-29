@@ -204,7 +204,8 @@ export default function SendPage() {
                         {LANGUAGE_LABELS[l]}：
                       </span>
                       <span className="text-slate-800">
-                        {v?.subject?.trim() || '（未填寫）'}
+                        {v?.subject?.trim().replace(/\s*\n\s*/g, ' ') ||
+                          '（未填寫）'}
                       </span>
                     </div>
                   </div>

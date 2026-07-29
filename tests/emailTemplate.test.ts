@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_EMAIL_LOGO,
   escapeHtml,
+  subjectSingleLine,
+  subjectMultiline,
   renderEmailHtml,
   safeUrl,
 } from '../shared/emailTemplate'
@@ -107,5 +109,26 @@ describe('renderEmailHtml', () => {
 describe('escapeHtml', () => {
   it('跳脫五個危險字元', () => {
     expect(escapeHtml('<>&"')).toBe('&lt;&gt;&amp;&quot;')
+  })
+})
+
+describe('主旨斷行', () => {
+  it('subjectSingleLine 把換行壓成單一空格（郵件主旨標頭用）', () => {
+    expect(subjectSingleLine('創見推出新產品，\n強化 AI 應用')).toBe(
+      '創見推出新產品， 強化 AI 應用',
+    )
+    expect(subjectSingleLine('a\r\nb')).toBe('a b')
+    expect(subjectSingleLine('  單行  ')).toBe('單行')
+  })
+
+  it('subjectMultiline 保留斷行為 <br> 並跳脫 HTML', () => {
+    expect(subjectMultiline('第一行\n第二行')).toBe('第一行<br>第二行')
+    expect(subjectMultiline('<b>x</b>\ny')).toBe('&lt;b&gt;x&lt;/b&gt;<br>y')
+  })
+
+  it('信件 <title> 不含換行，<h1> 保留斷行', () => {
+    const html = renderEmailHtml({ ...base, subject: '標題上\n標題下' })
+    expect(html).toContain('<title>標題上 標題下</title>')
+    expect(html).toContain('標題上<br>標題下')
   })
 })

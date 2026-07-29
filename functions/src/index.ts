@@ -15,6 +15,7 @@ import { SECTIGO_INTERMEDIATE_CA } from './smtpCa'
 import {
   renderEmailHtml,
   renderEmailText,
+  subjectSingleLine,
   type PressContact,
 } from './emailTemplate.generated'
 import {
@@ -549,7 +550,8 @@ export const sendCampaign = onCall<SendRequest>(
           to: r.name ? `"${r.name.replace(/"/g, '')}" <${r.email}>` : r.email,
           from: `"${SENDER_NAME_BY_LANG[r.language]}" <${settings.fromEmail}>`,
           replyTo: settings.replyTo,
-          subject: `${isTest ? '[測試] ' : ''}${version.subject}`,
+          // 郵件主旨標頭不能含換行，主旨的手動斷行只在信件內文/Word/PDF 呈現
+          subject: `${isTest ? '[測試] ' : ''}${subjectSingleLine(version.subject ?? '')}`,
           // 測試信加上標頭，萬一誤轉寄也看得出不是正式發稿
           headers: isTest ? { 'X-Press-Center-Test': 'true' } : undefined,
           text: renderEmailText(templateInput),

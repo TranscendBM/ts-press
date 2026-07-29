@@ -127,6 +127,20 @@ export function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;')
 }
 
+/**
+ * 主旨允許使用者手動斷行（在輸入框按 Enter）。
+ * 但**郵件主旨標頭與 <title> 不能含換行**（違反 RFC，會被伺服器改寫或截斷），
+ * 所以這裡把所有換行壓成單一空格。信件內文的大標題、Word、PDF 則保留斷行。
+ */
+export function subjectSingleLine(subject: string): string {
+  return subject.replace(/\s*\r?\n\s*/g, ' ').trim()
+}
+
+/** 信件內文大標題用：跳脫後把換行轉成 <br>，保留使用者的斷行。 */
+export function subjectMultiline(subject: string): string {
+  return escapeHtml(subject).replace(/\r?\n/g, '<br>')
+}
+
 /** 依語言格式化發佈日期。tw 用「2026年6月24日」，英文用「June 24, 2026」。 */
 export function formatReleaseDate(
   iso: string | undefined,
@@ -226,7 +240,7 @@ export function renderEmailHtml(input: TemplateInput): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${escapeHtml(input.subject)}</title>
+<title>${escapeHtml(subjectSingleLine(input.subject))}</title>
 </head>
 <body style="margin:0;padding:0;background-color:#f4f5f7;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
@@ -244,7 +258,7 @@ export function renderEmailHtml(input: TemplateInput): string {
       <!-- 標題與發佈日期 -->
       <tr><td style="padding:32px 32px 0;">
         <h1 style="margin:0;font-size:22px;line-height:1.45;font-weight:600;color:#12161c;font-family:${font};">
-          ${escapeHtml(input.subject)}
+          ${subjectMultiline(input.subject)}
         </h1>
         ${
           dateLine
