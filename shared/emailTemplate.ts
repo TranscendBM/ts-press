@@ -257,7 +257,7 @@ export function renderEmailHtml(input: TemplateInput): string {
 
       <!-- 標題與發佈日期 -->
       <tr><td style="padding:32px 32px 0;">
-        <h1 style="margin:0;font-size:22px;line-height:1.45;font-weight:600;color:#12161c;font-family:${font};">
+        <h1 style="margin:0;font-size:22px;line-height:1.45;font-weight:600;color:#12161c;font-family:${font};text-align:center;">
           ${subjectMultiline(input.subject)}
         </h1>
         ${

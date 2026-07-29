@@ -124,9 +124,21 @@ async function loadImage(url: string): Promise<LoadedImage | null> {
 }
 
 function textParagraph(text: string, opts: { spacing?: number } = {}) {
+  // 段落內的單行斷行（使用者按 Enter 但沒空行）也要保留 ——
+  // 網頁與 PDF 是把 \n 轉成 <br>，Word 則要每行一個 TextRun、以 break 換行，
+  // 否則同段落的多行會全部黏成一行。
+  const lines = text.split(/\r?\n/)
   return new Paragraph({
     spacing: { after: opts.spacing ?? 200, line: 300 },
-    children: [new TextRun({ text, size: SIZE_BODY, font: FONTS })],
+    children: lines.map(
+      (line, i) =>
+        new TextRun({
+          text: line,
+          break: i > 0 ? 1 : undefined,
+          size: SIZE_BODY,
+          font: FONTS,
+        }),
+    ),
   })
 }
 
@@ -138,6 +150,7 @@ export async function downloadWord(input: TemplateInput, filename: string) {
   children.push(
     new Paragraph({
       heading: HeadingLevel.HEADING_1,
+      alignment: AlignmentType.CENTER,
       spacing: { after: 120 },
       children: input.subject.split(/\r?\n/).map(
         (line, i) =>
@@ -436,7 +449,7 @@ export function downloadPdf(input: TemplateInput, filename: string) {
            border-bottom: 2px solid ${BRAND_COLOR}; padding-bottom: 10px; margin-bottom: 24px; }
   header img { height: 26px; width: auto; }
   header span { font-size: 9pt; color: #8a919e; }
-  h1 { font-size: 18pt; line-height: 1.4; color: #12161c; margin: 0 0 6px; }
+  h1 { font-size: 18pt; line-height: 1.4; color: #12161c; margin: 0 0 6px; text-align: center; }
   .date { font-size: 9pt; color: #8a919e; margin: 0 0 22px; }
   h2 { font-size: 12pt; color: ${BRAND_COLOR}; margin: 22px 0 8px; }
   p { margin: 0 0 12px; }
