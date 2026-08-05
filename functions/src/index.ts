@@ -431,12 +431,14 @@ export const sendCampaign = onCall<SendRequest>(
     let recipients: Contact[] = []
     let effectiveLists: string[] = []
 
+    // 已填寫（主旨＋內文都有）的語言版本。兩種測試模式都據此決定要寄哪幾版。
+    const filledLangs = LANGUAGES.filter((l) => {
+      const v = press.versions?.[l]
+      return !!(v?.subject?.trim() && v?.bodyText?.trim())
+    })
+
     if (mode === 'self') {
-      const langs = LANGUAGES.filter((l) => {
-        const v = press.versions?.[l]
-        return v?.subject?.trim() && v?.bodyText?.trim()
-      })
-      if (langs.length === 0) {
+      if (filledLangs.length === 0) {
         throw new HttpsError('failed-precondition', '沒有任何已填寫的語言版本。')
       }
       // 測試信收件人：登入者本人 + 後台「測試信收件人」設定的信箱，去重
@@ -453,7 +455,7 @@ export const sendCampaign = onCall<SendRequest>(
         }
       }
       // 每個已填語言版本 × 每個收件人各寄一封
-      recipients = langs.flatMap((l) =>
+      recipients = filledLangs.flatMap((l) =>
         emails.map((email, idx) => ({
           id: `self_${l}_${idx}`,
           name: user.displayName ?? '',
@@ -464,13 +466,21 @@ export const sendCampaign = onCall<SendRequest>(
       )
     } else if (mode === 'testList') {
       effectiveLists = [TEST_LIST_ID]
-      recipients = await expandLists(effectiveLists)
-      if (recipients.length === 0) {
+      const members = await expandLists(effectiveLists)
+      if (members.length === 0) {
         throw new HttpsError(
           'failed-precondition',
           '測試名單沒有任何聯絡人，請先到媒體名單把同仁加進「測試名單」。',
         )
       }
+      if (filledLangs.length === 0) {
+        throw new HttpsError('failed-precondition', '沒有任何已填寫的語言版本。')
+      }
+      // 測試名單每位成員都收到「所有已填寫的語言版本」，
+      // 不看成員自己的語言設定 —— 這樣一次就能核對 tw／www／us 三版。
+      recipients = members.flatMap((m) =>
+        filledLangs.map((l) => ({ ...m, id: `${m.id}_${l}`, language: l })),
+      )
     } else {
       // 正式發送：測試名單一律排除，避免內部信箱混進真實發稿
       effectiveLists = (targetLists ?? []).filter((l) => l !== TEST_LIST_ID)

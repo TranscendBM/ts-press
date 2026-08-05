@@ -282,8 +282,8 @@ export default function SendPage() {
                 寄給測試名單
               </div>
               <p className="mb-3 text-xs text-slate-500">
-                完整演練：流程與真實發稿相同，但只寄給「測試名單」裡的{' '}
-                {testListCount} 位內部同仁。
+                把已填寫的每個語言版本各寄一封給「測試名單」的每位成員（{testListCount}{' '}
+                位），每人都會收到 tw／www／us 三版，方便一次核對排版。
               </p>
               <Button
                 onClick={() => run('testList')}
