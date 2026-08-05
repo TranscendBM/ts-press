@@ -66,7 +66,7 @@ const COPY = {
   },
   www: {
     greeting: (name: string) => `Dear ${name},`,
-    fallbackGreeting: 'Dear Editor,',
+    fallbackGreeting: 'Hello,',
     contactTitle: 'Press Contact',
     aboutTitle: 'About Transcend',
     about:
@@ -77,7 +77,7 @@ const COPY = {
   },
   us: {
     greeting: (name: string) => `Dear ${name},`,
-    fallbackGreeting: 'Dear Editor,',
+    fallbackGreeting: 'Hello,',
     contactTitle: 'Press Contact',
     aboutTitle: 'About Transcend',
     about:
@@ -95,7 +95,7 @@ const COPY = {
  */
 const FONT_TW =
   "'Microsoft JhengHei',微軟正黑體,'PingFang TC','Helvetica Neue',Helvetica,Arial,sans-serif"
-const FONT_EN = "'Helvetica Neue',Helvetica,Arial,sans-serif"
+const FONT_EN = "Arial,'Helvetica Neue',Helvetica,sans-serif"
 
 /** 後台「關於創見」欄位留空時使用的預設文字，也用來預先填入編輯欄位。 */
 export const DEFAULT_ABOUT: Record<
