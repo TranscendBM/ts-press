@@ -87,3 +87,22 @@ export function chunk<T>(items: T[], size = BATCH_SIZE): T[][] {
   }
   return out
 }
+
+/**
+ * 把逗號／分號／換行分隔的信箱字串解析成陣列。
+ * 只保留格式合法的信箱，並以小寫比對去重（保留原始大小寫）。
+ * 用於「測試信收件人」等由使用者輸入的多信箱欄位。
+ */
+export function parseEmailList(raw: unknown): string[] {
+  if (typeof raw !== 'string') return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const part of raw.split(/[,;\n]/)) {
+    const e = part.trim()
+    if (e && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e) && !seen.has(e.toLowerCase())) {
+      seen.add(e.toLowerCase())
+      out.push(e)
+    }
+  }
+  return out
+}

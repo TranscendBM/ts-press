@@ -5,6 +5,7 @@ import {
   chunk,
   evaluateAccess,
   isAllowedAttachmentPath,
+  parseEmailList,
 } from '../shared/policy'
 
 describe('evaluateAccess', () => {
@@ -186,5 +187,33 @@ describe('chunk', () => {
   it('批次大小不合法時丟錯', () => {
     expect(() => chunk([1, 2], 0)).toThrow()
     expect(() => chunk([1, 2], -1)).toThrow()
+  })
+})
+
+describe('parseEmailList', () => {
+  it('逗號/分號/換行分隔都能解析', () => {
+    expect(parseEmailList('a@x.com, b@x.com; c@x.com\nd@x.com')).toEqual([
+      'a@x.com',
+      'b@x.com',
+      'c@x.com',
+      'd@x.com',
+    ])
+  })
+
+  it('以小寫比對去重，保留原始大小寫', () => {
+    expect(parseEmailList('Elvis@x.com, elvis@x.com')).toEqual(['Elvis@x.com'])
+  })
+
+  it('略過格式不合法的字串', () => {
+    expect(parseEmailList('good@x.com, 壞的, no-at, @x.com, a@b')).toEqual([
+      'good@x.com',
+    ])
+  })
+
+  it('空值與非字串回傳空陣列', () => {
+    expect(parseEmailList('')).toEqual([])
+    expect(parseEmailList(undefined)).toEqual([])
+    expect(parseEmailList(null)).toEqual([])
+    expect(parseEmailList(123)).toEqual([])
   })
 })

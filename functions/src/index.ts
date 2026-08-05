@@ -32,6 +32,7 @@ import {
   chunk,
   evaluateAccess,
   isAllowedAttachmentPath,
+  parseEmailList,
   type AppRole,
 } from './policy.generated'
 
@@ -82,6 +83,8 @@ interface SmtpSettings {
    */
   fromEmail: string
   replyTo: string
+  /** 「寄測試信給我」時，除了登入者本人，還會一併寄達的信箱。 */
+  testRecipients: string[]
 }
 
 async function readSmtpSettings(): Promise<SmtpSettings> {
@@ -99,6 +102,7 @@ async function readSmtpSettings(): Promise<SmtpSettings> {
     user: d.user,
     fromEmail: d.fromEmail || d.user,
     replyTo: d.replyTo || d.fromEmail || d.user,
+    testRecipients: parseEmailList(d.testRecipients),
   }
 }
 
@@ -422,13 +426,29 @@ export const sendCampaign = onCall<SendRequest>(
       if (langs.length === 0) {
         throw new HttpsError('failed-precondition', '沒有任何已填寫的語言版本。')
       }
-      recipients = langs.map((l) => ({
-        id: `self_${l}`,
-        name: user.displayName ?? '',
-        email: user.email,
-        outlet: '（測試信）',
-        language: l,
-      }))
+      // 測試信收件人：登入者本人 + 後台「測試信收件人」設定的信箱，去重
+      const extras = parseEmailList(
+        (await db.doc('settings/smtp').get()).data()?.testRecipients,
+      )
+      const seen = new Set<string>()
+      const emails: string[] = []
+      for (const e of [user.email, ...extras]) {
+        const key = e.toLowerCase()
+        if (!seen.has(key)) {
+          seen.add(key)
+          emails.push(e)
+        }
+      }
+      // 每個已填語言版本 × 每個收件人各寄一封
+      recipients = langs.flatMap((l) =>
+        emails.map((email, idx) => ({
+          id: `self_${l}_${idx}`,
+          name: user.displayName ?? '',
+          email,
+          outlet: '（測試信）',
+          language: l,
+        })),
+      )
     } else if (mode === 'testList') {
       effectiveLists = [TEST_LIST_ID]
       recipients = await expandLists(effectiveLists)
@@ -619,6 +639,8 @@ interface SmtpSettingsRequest {
   user: string
   fromEmail: string
   replyTo: string
+  /** 「寄測試信給我」的額外收件人（除登入者外），逗號／換行分隔。 */
+  testRecipients?: string
   /** 留空代表不更動現有密碼。 */
   password?: string
 }
@@ -627,7 +649,7 @@ interface SmtpSettingsRequest {
 export const updateSmtpSettings = onCall<SmtpSettingsRequest>(
   async (request) => {
     const admin = await requireAdmin(request.auth)
-    const { host, port, user, fromEmail, replyTo, password } =
+    const { host, port, user, fromEmail, replyTo, testRecipients, password } =
       request.data ?? {}
 
     if (!host?.trim() || !user?.trim()) {
@@ -660,6 +682,8 @@ export const updateSmtpSettings = onCall<SmtpSettingsRequest>(
         user: user.trim(),
         fromEmail: (fromEmail || '').trim() || user.trim(),
         replyTo: (replyTo || '').trim() || user.trim(),
+        // 正規化後存回：只留合法信箱、去重
+        testRecipients: parseEmailList(testRecipients).join(', '),
         updatedAt: FieldValue.serverTimestamp(),
         updatedBy: admin.email,
         ...(password ? { passwordUpdatedAt: FieldValue.serverTimestamp() } : {}),

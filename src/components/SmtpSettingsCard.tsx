@@ -3,7 +3,7 @@ import { doc, onSnapshot } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { CheckCircle2, KeyRound, Send, XCircle } from 'lucide-react'
 import { db, functions } from '../lib/firebase'
-import { Button, Field, TextInput } from './ui'
+import { Button, Field, TextArea, TextInput } from './ui'
 import { formatDate } from '../lib/helpers'
 
 const updateSmtpSettings = httpsCallable<
@@ -13,6 +13,7 @@ const updateSmtpSettings = httpsCallable<
     user: string
     fromEmail: string
     replyTo: string
+    testRecipients?: string
     password?: string
   },
   { ok: boolean }
@@ -29,6 +30,7 @@ interface StoredSettings {
   user?: string
   fromEmail?: string
   replyTo?: string
+  testRecipients?: string
   updatedAt?: import('firebase/firestore').Timestamp
   updatedBy?: string
   passwordUpdatedAt?: import('firebase/firestore').Timestamp
@@ -42,6 +44,7 @@ export default function SmtpSettingsCard() {
     user: '',
     fromEmail: '',
     replyTo: '',
+    testRecipients: '',
   })
   const [password, setPassword] = useState('')
   const [saving, setSaving] = useState(false)
@@ -60,6 +63,7 @@ export default function SmtpSettingsCard() {
         user: d.user ?? '',
         fromEmail: d.fromEmail ?? '',
         replyTo: d.replyTo ?? '',
+        testRecipients: d.testRecipients ?? '',
       })
     })
   }, [])
@@ -74,6 +78,7 @@ export default function SmtpSettingsCard() {
         user: form.user,
         fromEmail: form.fromEmail,
         replyTo: form.replyTo,
+        testRecipients: form.testRecipients,
         // 留空代表不更動現有密碼
         ...(password ? { password } : {}),
       })
@@ -112,6 +117,7 @@ export default function SmtpSettingsCard() {
     form.user !== (stored?.user ?? '') ||
     form.fromEmail !== (stored?.fromEmail ?? '') ||
     form.replyTo !== (stored?.replyTo ?? '') ||
+    form.testRecipients !== (stored?.testRecipients ?? '') ||
     Number(form.port) !== (stored?.port ?? 587)
 
   return (
@@ -164,6 +170,21 @@ export default function SmtpSettingsCard() {
             placeholder="press_center@transcend-info.com"
           />
         </Field>
+        <div className="sm:col-span-2">
+          <Field
+            label="測試信收件人"
+            hint="按「寄測試信給我」時，除了你自己，還會一併寄到這些信箱。多個請用逗號或換行分隔。"
+          >
+            <TextArea
+              rows={2}
+              value={form.testRecipients}
+              onChange={(e) =>
+                setForm({ ...form, testRecipients: e.target.value })
+              }
+              placeholder="elvis_cheng@transcend-info.com"
+            />
+          </Field>
+        </div>
         <div className="sm:col-span-2">
           <Field
             label="密碼"
