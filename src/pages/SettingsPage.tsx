@@ -15,6 +15,7 @@ import { Badge, Button, Field, Modal, Select, TextInput } from '../components/ui
 import SmtpSettingsCard from '../components/SmtpSettingsCard'
 import RolePermissionsCard from '../components/RolePermissionsCard'
 import PressContactsCard from '../components/PressContactsCard'
+import InternalCopyCard from '../components/InternalCopyCard'
 import { ROLES, ROLE_LABELS, normalizeRole, type Role } from '../constants'
 import { hasPermission, validateUserDoc } from '../../shared/permissions'
 import type { AppUser } from '../types'
@@ -135,6 +136,7 @@ export default function SettingsPage() {
       <div className="space-y-6 p-8">
         <RolePermissionsCard />
         <PressContactsCard />
+        <InternalCopyCard />
         <SmtpSettingsCard />
 
         {issues.length > 0 && (

@@ -32,6 +32,11 @@ export const LIST_DEFAULT_LANGUAGE: Record<ListId, Language> = {
 /** 內部測試用，不是真的媒體，介面上要標示清楚避免誤發。 */
 export const INTERNAL_LISTS: ListId[] = ['test']
 
+/** 可設定「內部副本」的名單：正式發送時一併知會公司同事。排除測試名單。 */
+export const COPYABLE_LISTS: ListId[] = LISTS.filter(
+  (l) => !INTERNAL_LISTS.includes(l),
+)
+
 /** 新聞稿分類。 */
 export const CATEGORIES = [
   'brand',

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { collection, getDocs, orderBy, query } from 'firebase/firestore'
+import { collection, doc, getDoc, getDocs, orderBy, query } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { AlertTriangle, CheckCircle2, Send, TestTube2 } from 'lucide-react'
 import { db, functions } from '../lib/firebase'
@@ -17,7 +17,8 @@ import {
   type Language,
   type ListId,
 } from '../constants'
-import type { MediaContact, PressRelease } from '../types'
+import type { EmailSettings, MediaContact, PressRelease } from '../types'
+import { expandInternalCopies } from '../../shared/policy'
 import { blankVersions, formatBytes } from '../lib/helpers'
 
 type SendMode = 'self' | 'testList' | 'real'
@@ -36,6 +37,9 @@ export default function SendPage() {
 
   const [presses, setPresses] = useState<PressRelease[]>([])
   const [contacts, setContacts] = useState<MediaContact[]>([])
+  const [internalCopies, setInternalCopies] = useState<
+    Partial<Record<ListId, string>>
+  >({})
   const [pressId, setPressId] = useState(params.get('press') ?? '')
   const [selected, setSelected] = useState<ListId[]>([])
   const [loading, setLoading] = useState(true)
@@ -48,10 +52,14 @@ export default function SendPage() {
 
   useEffect(() => {
     async function load() {
-      const [pSnap, cSnap] = await Promise.all([
+      const [pSnap, cSnap, emailSnap] = await Promise.all([
         getDocs(query(collection(db, 'pressReleases'), orderBy('updatedAt', 'desc'))),
         getDocs(collection(db, 'mediaContacts')),
+        getDoc(doc(db, 'settings', 'email')),
       ])
+      setInternalCopies(
+        (emailSnap.data() as EmailSettings | undefined)?.internalCopies ?? {},
+      )
       setPresses(
         pSnap.docs.map((d) => {
           const data = d.data() as PressRelease
@@ -92,6 +100,20 @@ export default function SendPage() {
     for (const r of recipients) map[r.language]?.push(r)
     return map
   }, [recipients])
+
+  /**
+   * 內部副本收件人（僅供確認畫面顯示，實際仍以後端為準）。
+   * 與後端相同：跨名單、與媒體重複都去重，每人只算一份。
+   */
+  const internalCopyRecipients = useMemo(
+    () =>
+      expandInternalCopies(
+        internalCopies,
+        selected,
+        recipients.map((r) => r.email),
+      ).map((c) => c.email),
+    [selected, internalCopies, recipients],
+  )
 
   /** 有收件人、但對應語言版本沒填主旨或內文 → 擋下發送。 */
   const missingVersions = useMemo(() => {
@@ -344,6 +366,14 @@ export default function SendPage() {
                   </div>
                 ) : null,
               )}
+              {internalCopyRecipients.length > 0 && (
+                <div className="mt-2 border-t border-slate-200 pt-2 text-slate-600">
+                  另外副本知會 {internalCopyRecipients.length} 位公司同事：
+                  <span className="text-slate-500">
+                    {internalCopyRecipients.join('、')}
+                  </span>
+                </div>
+              )}
             </div>
           )}
 
@@ -397,6 +427,11 @@ export default function SendPage() {
             <div className="mt-1 text-xs text-slate-500">
               名單：{selected.map((l) => LIST_LABELS[l]).join('、')}
             </div>
+            {internalCopyRecipients.length > 0 && (
+              <div className="mt-1 text-xs text-slate-500">
+                另副本知會 {internalCopyRecipients.length} 位公司同事
+              </div>
+            )}
           </div>
           <p className="text-amber-700">
             發送後無法收回，請確認已寄過測試信並檢查無誤。

@@ -84,6 +84,12 @@ export interface EmailSettings {
   logoUrl?: string
   contacts?: Record<Language, PressContact>
   about?: Record<Language, AboutBlock>
+  /**
+   * 內部副本收件人：正式發送某個媒體名單時，一併寄一份給這些公司同事。
+   * 依名單分別設定，每個值是逗號／換行分隔的信箱字串。
+   * 同事只會收到一份（跨名單、與媒體重複都會自動去重）。
+   */
+  internalCopies?: Partial<Record<ListId, string>>
 }
 
 export interface PressRelease {

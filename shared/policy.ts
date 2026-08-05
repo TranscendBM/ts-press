@@ -106,3 +106,29 @@ export function parseEmailList(raw: unknown): string[] {
   }
   return out
 }
+
+/**
+ * 展開「內部副本」收件人：把選取名單設定的公司同事攤平成清單。
+ *
+ * 每人只保留一份 —— excludeEmails（通常是媒體收件人）已經有的、以及跨名單
+ * 重複的都會去掉。回傳時保留每個信箱來自哪個名單，呼叫端據此決定語言版本。
+ * 去重一律以小寫比對，但輸出保留原始大小寫。
+ */
+export function expandInternalCopies(
+  copies: Record<string, string | undefined> | undefined,
+  selectedLists: string[],
+  excludeEmails: Iterable<string> = [],
+): { email: string; list: string }[] {
+  const seen = new Set<string>()
+  for (const e of excludeEmails) seen.add(e.toLowerCase())
+  const out: { email: string; list: string }[] = []
+  for (const list of selectedLists) {
+    for (const email of parseEmailList(copies?.[list])) {
+      const key = email.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ email, list })
+    }
+  }
+  return out
+}

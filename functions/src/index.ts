@@ -31,6 +31,7 @@ import {
   BATCH_SIZE,
   chunk,
   evaluateAccess,
+  expandInternalCopies,
   isAllowedAttachmentPath,
   parseEmailList,
   type AppRole,
@@ -162,6 +163,17 @@ const SENDER_NAME_BY_LANG = {
 
 const LANGUAGES = ['tw', 'www', 'us'] as const
 type Language = (typeof LANGUAGES)[number]
+
+/**
+ * 名單對應的語言版本，內部副本要依所屬名單決定寄哪個版本。
+ * 必須與前端 src/constants.ts 的 LIST_DEFAULT_LANGUAGE 一致。
+ */
+const LIST_LANGUAGE: Record<string, Language> = {
+  tw_pr: 'tw',
+  tw_ir: 'tw',
+  global_pr: 'www',
+  us_pr: 'us',
+}
 
 interface Version {
   subject?: string
@@ -400,6 +412,7 @@ export const sendCampaign = onCall<SendRequest>(
         logoUrl?: string
         contacts?: Record<Language, PressContact>
         about?: Record<Language, { text?: string; link?: string }>
+        internalCopies?: Record<string, string>
       })
 
     /** 依名單展開收件人，同一個 email 只留一份。 */
@@ -468,6 +481,25 @@ export const sendCampaign = onCall<SendRequest>(
       if (recipients.length === 0) {
         throw new HttpsError('failed-precondition', '勾選的名單沒有任何收件人。')
       }
+
+      // 內部副本：正式發送時，把設定裡對應名單的公司同事一併寄送。
+      // 每人只收一份 —— 跨名單、與媒體收件人重複都在 expandInternalCopies 去重。
+      const copies = expandInternalCopies(
+        emailSettings.internalCopies,
+        effectiveLists,
+        recipients.map((r) => r.email),
+      )
+      copies.forEach(({ email, list }, i) => {
+        const lang = LIST_LANGUAGE[list]
+        if (!lang) return
+        recipients.push({
+          id: `internal_${i}`,
+          name: '',
+          email,
+          outlet: '（內部副本）',
+          language: lang,
+        })
+      })
     }
 
     if (mode !== 'self') {

@@ -4,6 +4,7 @@ import {
   BATCH_SIZE,
   chunk,
   evaluateAccess,
+  expandInternalCopies,
   isAllowedAttachmentPath,
   parseEmailList,
 } from '../shared/policy'
@@ -215,5 +216,46 @@ describe('parseEmailList', () => {
     expect(parseEmailList(undefined)).toEqual([])
     expect(parseEmailList(null)).toEqual([])
     expect(parseEmailList(123)).toEqual([])
+  })
+})
+
+describe('expandInternalCopies', () => {
+  const copies = {
+    global_pr: 'alice@x.com, bob@x.com',
+    us_pr: 'carol@x.com',
+    tw_pr: 'dave@x.com',
+  }
+
+  it('只展開有選取的名單', () => {
+    expect(expandInternalCopies(copies, ['global_pr'])).toEqual([
+      { email: 'alice@x.com', list: 'global_pr' },
+      { email: 'bob@x.com', list: 'global_pr' },
+    ])
+  })
+
+  it('保留每個信箱來自哪個名單', () => {
+    const r = expandInternalCopies(copies, ['global_pr', 'us_pr'])
+    expect(r).toContainEqual({ email: 'carol@x.com', list: 'us_pr' })
+    expect(r).toHaveLength(3)
+  })
+
+  it('排除已是媒體收件人的信箱（大小寫不敏感）', () => {
+    const r = expandInternalCopies(copies, ['global_pr'], ['ALICE@x.com'])
+    expect(r).toEqual([{ email: 'bob@x.com', list: 'global_pr' }])
+  })
+
+  it('同一人同時在多個選取名單只留一份（第一個名單勝出）', () => {
+    const dup = { global_pr: 'sam@x.com', us_pr: 'sam@x.com' }
+    expect(expandInternalCopies(dup, ['global_pr', 'us_pr'])).toEqual([
+      { email: 'sam@x.com', list: 'global_pr' },
+    ])
+  })
+
+  it('名單沒設定或設定不合法時略過', () => {
+    expect(expandInternalCopies({ global_pr: '亂打, no-at' }, ['global_pr'])).toEqual(
+      [],
+    )
+    expect(expandInternalCopies(undefined, ['global_pr'])).toEqual([])
+    expect(expandInternalCopies(copies, [])).toEqual([])
   })
 })
