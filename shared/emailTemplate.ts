@@ -54,8 +54,6 @@ const MONTHS_EN = [
 
 const COPY = {
   tw: {
-    greeting: (name: string) => `${name} 您好：`,
-    fallbackGreeting: '媒體先進 您好：',
     contactTitle: '新聞聯絡人',
     aboutTitle: '關於創見資訊',
     about:
@@ -65,8 +63,6 @@ const COPY = {
     unsubscribeSuffix: ' 取消訂閱。',
   },
   www: {
-    greeting: (name: string) => `Dear ${name},`,
-    fallbackGreeting: 'Hello,',
     contactTitle: 'Press Contact',
     aboutTitle: 'About Transcend',
     about:
@@ -76,8 +72,6 @@ const COPY = {
     unsubscribeSuffix: '.',
   },
   us: {
-    greeting: (name: string) => `Dear ${name},`,
-    fallbackGreeting: 'Hello,',
     contactTitle: 'Press Contact',
     aboutTitle: 'About Transcend',
     about:
@@ -187,9 +181,6 @@ export function renderBlocks(text: string, font: string): string[] {
 export function renderEmailHtml(input: TemplateInput): string {
   const copy = COPY[input.language]
   const font = input.language === 'tw' ? FONT_TW : FONT_EN
-  const greeting = input.recipientName?.trim()
-    ? copy.greeting(escapeHtml(input.recipientName.trim()))
-    : copy.fallbackGreeting
 
   const blocks = renderBlocks(input.bodyText, font)
   const dateLine = formatReleaseDate(input.releaseDate, input.language)
@@ -270,13 +261,8 @@ export function renderEmailHtml(input: TemplateInput): string {
         <div style="margin:20px 0 0;height:1px;background-color:#e6e8ec;font-size:0;line-height:0;">&nbsp;</div>
       </td></tr>
 
-      <!-- 稱謂 -->
-      <tr><td style="padding:20px 32px 0;">
-        <p style="margin:0 0 16px;font-size:15px;line-height:1.8;color:#2b2f36;font-family:${font};">${greeting}</p>
-      </td></tr>
-
       <!-- 內文 -->
-      <tr><td style="padding:0 32px;">${body}</td></tr>
+      <tr><td style="padding:24px 32px 0;">${body}</td></tr>
 
       <!-- 新聞聯絡人 -->
       <tr><td style="padding:0 32px 28px;">${contactBlock}</td></tr>
@@ -316,16 +302,11 @@ export function renderEmailHtml(input: TemplateInput): string {
 /** 純文字備援版本，給不顯示 HTML 的信箱使用。 */
 export function renderEmailText(input: TemplateInput): string {
   const copy = COPY[input.language]
-  const greeting = input.recipientName?.trim()
-    ? copy.greeting(input.recipientName.trim())
-    : copy.fallbackGreeting
   const c = input.contact
 
   return [
     input.subject,
     formatReleaseDate(input.releaseDate, input.language),
-    '',
-    greeting,
     '',
     input.bodyText.replace(/^## /gm, '').trim(),
     '',

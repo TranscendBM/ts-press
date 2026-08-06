@@ -5,6 +5,7 @@ import {
   subjectSingleLine,
   subjectMultiline,
   renderEmailHtml,
+  renderEmailText,
   safeUrl,
 } from '../shared/emailTemplate'
 
@@ -68,9 +69,13 @@ describe('renderEmailHtml', () => {
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;')
   })
 
-  it('收件人姓名會被跳脫', () => {
-    const html = renderEmailHtml({ ...base, recipientName: '"><script>x' })
-    expect(html).not.toContain('"><script>')
+  it('已移除稱謂，收件人姓名不再出現在信中', () => {
+    const html = renderEmailHtml({ ...base, recipientName: 'Alice Wang' })
+    expect(html).not.toContain('Alice Wang')
+    expect(html).not.toContain('您好')
+    const text = renderEmailText({ ...base, recipientName: 'Alice Wang' })
+    expect(text).not.toContain('Alice Wang')
+    expect(text).not.toContain('您好')
   })
 
   it('內文的 javascript: 不會變成連結', () => {
