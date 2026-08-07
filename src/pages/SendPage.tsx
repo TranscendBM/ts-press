@@ -78,9 +78,15 @@ export default function SendPage() {
     load()
   }, [])
 
+  /** 已封存的新聞稿不能發送，從下拉選單排除；直接用網址帶封存稿件的 id 進來也一併擋掉。 */
+  const sendablePresses = useMemo(
+    () => presses.filter((p) => !p.archived),
+    [presses],
+  )
+
   const press = useMemo(
-    () => presses.find((p) => p.id === pressId) ?? null,
-    [presses, pressId],
+    () => sendablePresses.find((p) => p.id === pressId) ?? null,
+    [sendablePresses, pressId],
   )
 
   /** 依勾選的名單展開收件人，同一個 email 只留一份。 */
@@ -202,7 +208,7 @@ export default function SendPage() {
             onChange={(e) => setPressId(e.target.value)}
           >
             <option value="">— 請選擇 —</option>
-            {presses.map((p) => (
+            {sendablePresses.map((p) => (
               <option key={p.id} value={p.id}>
                 [{CATEGORY_LABELS[p.category]}] {p.title}
               </option>
@@ -312,6 +318,14 @@ export default function SendPage() {
             <AlertTriangle className="mt-0.5 size-4 shrink-0" />
             <span>以下按鈕會真的寄給媒體記者，送出後無法收回。</span>
           </div>
+          {press?.category === 'revenue' && (
+            <div className="mb-4 flex gap-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+              <span>
+                發送營收新聞稿之前，請確認營收是否已經公告，可與財會處或上公開資訊觀測站確認。
+              </span>
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3">
             {/* 測試名單不出現在這裡，只能由上方的測試按鈕觸發 */}
             {LISTS.filter((l) => !INTERNAL_LISTS.includes(l)).map((l) => {
