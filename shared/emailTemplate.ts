@@ -158,6 +158,29 @@ const linkify = (s: string) =>
   })
 
 /**
+ * 把純文字切成「一般文字」與「網址」交錯的片段，供 Word / PDF 產生真正的超連結。
+ *
+ * 只認 http/https 絕對網址。網址尾端常見的標點（句號、逗號、右括號、中文標點）
+ * 會被排除在連結外 —— 否則「…/ssd。」的句號會被一起吃進網址而失效。
+ */
+export function splitLinks(text: string): { text: string; url?: string }[] {
+  const re = /(https?:\/\/[^\s<]+)/g
+  const out: { text: string; url?: string }[] = []
+  let last = 0
+  for (const m of text.matchAll(re)) {
+    let url = m[0]
+    const start = m.index ?? 0
+    const trail = url.match(/[).,;:!?、。」』）】]+$/)
+    if (trail) url = url.slice(0, url.length - trail[0].length)
+    if (start > last) out.push({ text: text.slice(last, start) })
+    out.push({ text: url, url })
+    last = start + url.length
+  }
+  if (last < text.length) out.push({ text: text.slice(last) })
+  return out
+}
+
+/**
  * 把純文字切成區塊。空行分段；以 `## ` 開頭的行視為小標題。
  * 回傳陣列而非字串，方便呼叫端把圖片插在第一段之後。
  */

@@ -7,6 +7,7 @@ import {
   renderEmailHtml,
   renderEmailText,
   safeUrl,
+  splitLinks,
 } from '../shared/emailTemplate'
 
 const base = {
@@ -36,6 +37,39 @@ describe('safeUrl', () => {
   it('空值回傳空字串', () => {
     expect(safeUrl(undefined)).toBe('')
     expect(safeUrl('   ')).toBe('')
+  })
+})
+
+describe('splitLinks', () => {
+  it('把網址切出來、保留前後文字', () => {
+    expect(splitLinks('詳見 https://a.com/x 頁面')).toEqual([
+      { text: '詳見 ' },
+      { text: 'https://a.com/x', url: 'https://a.com/x' },
+      { text: ' 頁面' },
+    ])
+  })
+
+  it('保留網址裡的連字號', () => {
+    const r = splitLinks('https://tw.transcend-info.com/ssd')
+    expect(r).toEqual([
+      {
+        text: 'https://tw.transcend-info.com/ssd',
+        url: 'https://tw.transcend-info.com/ssd',
+      },
+    ])
+  })
+
+  it('尾端的中文句號與逗號不會被吃進網址', () => {
+    expect(splitLinks('看 https://a.com/x。')).toEqual([
+      { text: '看 ' },
+      { text: 'https://a.com/x', url: 'https://a.com/x' },
+      { text: '。' },
+    ])
+  })
+
+  it('沒有網址時原樣回傳', () => {
+    expect(splitLinks('純文字')).toEqual([{ text: '純文字' }])
+    expect(splitLinks('')).toEqual([])
   })
 })
 

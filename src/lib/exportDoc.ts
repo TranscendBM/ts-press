@@ -2,6 +2,7 @@ import {
   AlignmentType,
   BorderStyle,
   Document,
+  ExternalHyperlink,
   Footer,
   Header,
   HeadingLevel,
@@ -18,6 +19,7 @@ import {
   escapeHtml,
   formatReleaseDate,
   safeUrl,
+  splitLinks,
   type TemplateInput,
 } from '../../shared/emailTemplate'
 import {
@@ -123,22 +125,39 @@ async function loadImage(url: string): Promise<LoadedImage | null> {
   }
 }
 
+/** 把一行文字拆成一般文字與可點網址，網址輸出成真正的超連結。 */
+function bodyRuns(line: string): (TextRun | ExternalHyperlink)[] {
+  return splitLinks(line).map((seg) =>
+    seg.url
+      ? new ExternalHyperlink({
+          link: seg.url,
+          children: [
+            new TextRun({
+              text: seg.text,
+              size: SIZE_BODY,
+              font: FONTS,
+              color: BRAND_HEX,
+              underline: {},
+            }),
+          ],
+        })
+      : new TextRun({ text: seg.text, size: SIZE_BODY, font: FONTS }),
+  )
+}
+
 function textParagraph(text: string, opts: { spacing?: number } = {}) {
   // 段落內的單行斷行（使用者按 Enter 但沒空行）也要保留 ——
-  // 網頁與 PDF 是把 \n 轉成 <br>，Word 則要每行一個 TextRun、以 break 換行，
-  // 否則同段落的多行會全部黏成一行。
+  // 網頁與 PDF 是把 \n 轉成 <br>，Word 則用一個空的 break TextRun 換行，
+  // 否則同段落的多行會全部黏成一行。網址則拆出來變成超連結。
   const lines = text.split(/\r?\n/)
+  const children: (TextRun | ExternalHyperlink)[] = []
+  lines.forEach((line, i) => {
+    if (i > 0) children.push(new TextRun({ break: 1 }))
+    children.push(...bodyRuns(line))
+  })
   return new Paragraph({
     spacing: { after: opts.spacing ?? 200, line: 300 },
-    children: lines.map(
-      (line, i) =>
-        new TextRun({
-          text: line,
-          break: i > 0 ? 1 : undefined,
-          size: SIZE_BODY,
-          font: FONTS,
-        }),
-    ),
+    children,
   })
 }
 
@@ -260,11 +279,25 @@ export async function downloadWord(input: TemplateInput, filename: string) {
       c.phone,
     ].filter(Boolean)
     for (const line of lines) {
+      const isEmail = !!c.email && line === c.email
       children.push(
         new Paragraph({
           spacing: { after: 60 },
           children: [
-            new TextRun({ text: line, size: 20, color: '4A505C', font: FONTS }),
+            isEmail
+              ? new ExternalHyperlink({
+                  link: `mailto:${c.email}`,
+                  children: [
+                    new TextRun({
+                      text: line,
+                      size: 20,
+                      color: BRAND_HEX,
+                      underline: {},
+                      font: FONTS,
+                    }),
+                  ],
+                })
+              : new TextRun({ text: line, size: 20, color: '4A505C', font: FONTS }),
           ],
         }),
       )
@@ -290,11 +323,18 @@ export async function downloadWord(input: TemplateInput, filename: string) {
     new Paragraph({
       spacing: { line: 280 },
       children: [
-        new TextRun({
-          text: `${about} ${aboutLink}`,
-          size: 18,
-          color: '8A919E',
-          font: FONTS,
+        new TextRun({ text: `${about} `, size: 18, color: '8A919E', font: FONTS }),
+        new ExternalHyperlink({
+          link: aboutLink,
+          children: [
+            new TextRun({
+              text: aboutLink,
+              size: 18,
+              color: BRAND_HEX,
+              underline: {},
+              font: FONTS,
+            }),
+          ],
         }),
       ],
     }),
@@ -390,6 +430,24 @@ export async function downloadWord(input: TemplateInput, filename: string) {
 }
 
 /**
+ * 把純文字轉成 HTML，並把網址包成明確的 <a>。
+ *
+ * 一定要自己輸出 <a>：若留純文字，Chrome 列印成 PDF 時會「自動偵測網址並加連結」，
+ * 而它的自動偵測會把 transcend-info.com 的連字號吃掉、連到錯誤網址。
+ * 先輸出成正式連結，Chrome 就不會再自作主張。
+ */
+function linkifyHtml(text: string): string {
+  return splitLinks(text)
+    .map((seg) => {
+      const safe = escapeHtml(seg.text)
+      if (!seg.url) return safe
+      const href = safeUrl(seg.url)
+      return href ? `<a href="${href}">${safe}</a>` : safe
+    })
+    .join('')
+}
+
+/**
  * PDF 走瀏覽器列印。刻意不重用信件樣板 ——
  * 信件是紅底白 logo，而瀏覽器列印預設不輸出背景色，
  * logo 會融進白底消失。這裡改用與 Word 一致的白底紅 logo 版面。
@@ -414,7 +472,7 @@ export function downloadPdf(input: TemplateInput, filename: string) {
     .map((b) =>
       b.startsWith('## ')
         ? `<h2>${escapeHtml(b.slice(3).trim())}</h2>`
-        : `<p>${escapeHtml(b).replace(/\n/g, '<br>')}</p>`,
+        : `<p>${linkifyHtml(b).replace(/\n/g, '<br>')}</p>`,
     )
 
   const heroSrc = safeUrl(input.heroImageUrl)
@@ -427,7 +485,7 @@ export function downloadPdf(input: TemplateInput, filename: string) {
     ? `<section class="contact">
          <h3>${input.language === 'tw' ? '新聞聯絡人' : 'Press Contact'}</h3>
          <p>${escapeHtml([c.name, c.company].filter(Boolean).join(' · '))}</p>
-         ${c.email ? `<p>${escapeHtml(c.email)}</p>` : ''}
+         ${c.email ? `<p><a href="${safeUrl(`mailto:${c.email}`)}">${escapeHtml(c.email)}</a></p>` : ''}
          ${c.phone ? `<p>${escapeHtml(c.phone)}</p>` : ''}
        </section>`
     : ''
@@ -453,6 +511,7 @@ export function downloadPdf(input: TemplateInput, filename: string) {
   .date { font-size: 9pt; color: #8a919e; margin: 0 0 22px; }
   h2 { font-size: 12pt; color: ${BRAND_COLOR}; margin: 22px 0 8px; }
   p { margin: 0 0 12px; }
+  a { color: ${BRAND_COLOR}; text-decoration: underline; word-break: break-all; }
   .pic { text-align: center; margin: 16px 0 20px; }
   .pic img { max-width: 280px; height: auto; }
   .contact { margin-top: 28px; padding-top: 14px; border-top: 1px solid #e6e8ec; }
@@ -479,7 +538,7 @@ export function downloadPdf(input: TemplateInput, filename: string) {
   ${blocks.join('')}
   ${contactBlock}
   <footer>
-    <p>${escapeHtml(input.language === 'tw' ? '關於創見資訊' : 'About Transcend')}：${escapeHtml(about)} ${escapeHtml(aboutLink)}</p>
+    <p>${escapeHtml(input.language === 'tw' ? '關於創見資訊' : 'About Transcend')}：${escapeHtml(about)} <a href="${safeUrl(aboutLink)}">${escapeHtml(aboutLink)}</a></p>
     <p>&copy; Transcend Information, Inc. All Rights Reserved.</p>
   </footer>
 </body>
