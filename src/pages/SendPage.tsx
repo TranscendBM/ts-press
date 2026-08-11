@@ -211,6 +211,7 @@ export default function SendPage() {
             {sendablePresses.map((p) => (
               <option key={p.id} value={p.id}>
                 [{CATEGORY_LABELS[p.category]}] {p.title}
+                {p.scheduledDate ? `｜計畫發送 ${p.scheduledDate}` : ''}
               </option>
             ))}
           </Select>
