@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { doc, getDoc, serverTimestamp, updateDoc } from 'firebase/firestore'
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  serverTimestamp,
+  updateDoc,
+} from 'firebase/firestore'
 import {
   ArrowLeft,
   Eye,
@@ -24,7 +31,7 @@ import {
   type Category,
   type Language,
 } from '../constants'
-import type { EmailSettings, PressRelease, StoredFile } from '../types'
+import type { AppUser, EmailSettings, PressRelease, StoredFile } from '../types'
 import { blankVersions, formatBytes } from '../lib/helpers'
 import {
   deletePressFile,
@@ -56,10 +63,19 @@ export default function PressEditPage() {
   const attachInput = useRef<HTMLInputElement>(null)
   // 預覽要跟實際寄出的信一致，所以 logo 與新聞聯絡人也要帶進來
   const [emailSettings, setEmailSettings] = useState<EmailSettings | null>(null)
+  // 負責人下拉：列出所有白名單使用者
+  const [users, setUsers] = useState<AppUser[]>([])
 
   useEffect(() => {
     getDoc(doc(db, 'settings', 'email')).then((snap) => {
       if (snap.exists()) setEmailSettings(snap.data() as EmailSettings)
+    })
+    getDocs(collection(db, 'users')).then((snap) => {
+      const list = snap.docs.map((d) => d.data() as AppUser)
+      list.sort((a, b) =>
+        (a.displayName || a.email).localeCompare(b.displayName || b.email),
+      )
+      setUsers(list)
     })
   }, [])
 
@@ -316,7 +332,7 @@ export default function PressEditPage() {
           </div>
         )}
 
-        <div className="mb-6 grid grid-cols-4 gap-4 rounded-xl border border-slate-200 bg-white p-5">
+        <div className="mb-6 grid grid-cols-2 gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:grid-cols-6">
           <div className="col-span-2">
             <Field label="稿件標題（僅供後台辨識）">
               <TextInput
@@ -339,7 +355,7 @@ export default function PressEditPage() {
               ))}
             </Select>
           </Field>
-          <Field label="發佈日期" hint="顯示在信件標題下方。">
+          <Field label="發佈日期" hint="印在信件標題下方。">
             <TextInput
               type="date"
               value={press.releaseDate ?? ''}
@@ -347,6 +363,36 @@ export default function PressEditPage() {
                 patch((p) => ({ ...p, releaseDate: e.target.value }))
               }
             />
+          </Field>
+          <Field label="計畫發送日期" hint="內部排程用，不印在信上。">
+            <TextInput
+              type="date"
+              value={press.scheduledDate ?? ''}
+              onChange={(e) =>
+                patch((p) => ({ ...p, scheduledDate: e.target.value }))
+              }
+            />
+          </Field>
+          <Field label="負責人">
+            <Select
+              value={press.ownerEmail ?? ''}
+              onChange={(e) => {
+                const email = e.target.value
+                const u = users.find((x) => x.email === email)
+                patch((p) => ({
+                  ...p,
+                  ownerEmail: email,
+                  ownerName: u?.displayName || email,
+                }))
+              }}
+            >
+              <option value="">（未指定）</option>
+              {users.map((u) => (
+                <option key={u.email} value={u.email}>
+                  {u.displayName || u.email}
+                </option>
+              ))}
+            </Select>
           </Field>
         </div>
 

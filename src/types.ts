@@ -96,14 +96,24 @@ export interface PressRelease {
   id: string
   title: string
   category: Category
-  /** 新聞稿發佈日期，格式 yyyy-mm-dd，顯示在標題下方。 */
+  /** 新聞稿發佈日期，格式 yyyy-mm-dd，顯示在標題下方（給記者看，印在信上）。 */
   releaseDate?: string
+  /**
+   * 內部規劃的計畫發送日期，格式 yyyy-mm-dd。只用於「發送排程」看板，
+   * 不會出現在信件內容裡，與 releaseDate 分開。
+   */
+  scheduledDate?: string
+  /** 負責人（白名單使用者的 email 與顯示名稱，指派時一併記下）。 */
+  ownerEmail?: string
+  ownerName?: string
   versions: Record<Language, PressVersion>
   /** 附件為三個版本共用。 */
   attachments: StoredFile[]
   status: 'draft' | 'sent'
   /** 封存後移到列表下方，不影響已發送的紀錄。 */
   archived?: boolean
+  /** 實際完成正式發送的時間，由 Cloud Function 在發送後標記。 */
+  sentAt?: Timestamp
   createdBy: string
   createdAt?: Timestamp
   updatedAt?: Timestamp

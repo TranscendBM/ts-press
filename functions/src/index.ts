@@ -649,7 +649,8 @@ export const sendCampaign = onCall<SendRequest>(
       await db
         .collection('pressReleases')
         .doc(pressReleaseId)
-        .update({ status: 'sent' })
+        // sentAt 供「發送排程」看板顯示實際發送時間，對照計畫日期
+        .update({ status: 'sent', sentAt: FieldValue.serverTimestamp() })
     }
 
     return { campaignId: campaignRef.id, recipients: recipients.length }

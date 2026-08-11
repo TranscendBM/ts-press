@@ -158,7 +158,12 @@ export default function PressListPage() {
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-400">
             <Badge>{CATEGORY_LABELS[item.category]}</Badge>
-            {item.releaseDate && <span>{item.releaseDate}</span>}
+            {item.scheduledDate && (
+              <span className="font-medium text-brand-700">
+                計畫發送 {item.scheduledDate}
+              </span>
+            )}
+            {item.ownerName && <span>· 負責人 {item.ownerName}</span>}
             <span>·</span>
             <span>已填 {filled}/3 個語言版本</span>
             <span>·</span>

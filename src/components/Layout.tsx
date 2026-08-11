@@ -1,6 +1,7 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import {
   BarChart3,
+  CalendarClock,
   FileText,
   HeartHandshake,
   LogOut,
@@ -14,6 +15,7 @@ import { ROLE_LABELS, normalizeRole, type Permission } from '../constants'
 
 const NAV = [
   { to: '/press', label: '新聞稿', icon: FileText, need: 'viewPress' },
+  { to: '/schedule', label: '發送排程', icon: CalendarClock, need: 'viewPress' },
   { to: '/contacts', label: '媒體名單', icon: Users, need: 'manageContacts' },
   {
     to: '/events',

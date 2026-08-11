@@ -8,6 +8,7 @@ import EventDetailPage from './pages/EventDetailPage'
 import EventMatrixPage from './pages/EventMatrixPage'
 import PressListPage from './pages/PressListPage'
 import PressEditPage from './pages/PressEditPage'
+import SchedulePage from './pages/SchedulePage'
 import SendPage from './pages/SendPage'
 import CampaignsPage from './pages/CampaignsPage'
 import CampaignDetailPage from './pages/CampaignDetailPage'
@@ -32,6 +33,7 @@ function Shell() {
         <Route index element={<Navigate to="/press" replace />} />
         <Route path="/press" element={<PressListPage />} />
         <Route path="/press/:id" element={<PressEditPage />} />
+        <Route path="/schedule" element={<SchedulePage />} />
         <Route path="/contacts" element={<ContactsPage />} />
         <Route path="/events" element={<EventsPage />} />
         <Route path="/events/matrix" element={<EventMatrixPage />} />
