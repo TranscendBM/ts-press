@@ -81,10 +81,27 @@ export default function PressListPage() {
     [items, category, year],
   )
 
+  /** 進行中：依計畫發送日期由近到遠；沒排定日期的排最後，再依更新時間新到舊。 */
+  function byScheduledAsc(a: PressRelease, b: PressRelease) {
+    if (a.scheduledDate && b.scheduledDate) {
+      return a.scheduledDate.localeCompare(b.scheduledDate)
+    }
+    if (a.scheduledDate) return -1
+    if (b.scheduledDate) return 1
+    return (b.updatedAt?.toMillis?.() ?? 0) - (a.updatedAt?.toMillis?.() ?? 0)
+  }
+
+  /** 已封存：依實際發送日期由近到遠（最近發送的在前）；沒有發送時間的排最後。 */
+  function bySentDesc(a: PressRelease, b: PressRelease) {
+    return (b.sentAt?.toMillis?.() ?? 0) - (a.sentAt?.toMillis?.() ?? 0)
+  }
+
   // 封存優先，其餘再依是否已發送分成草稿與已發送兩組
-  const drafts = visible.filter((i) => !i.archived && i.status !== 'sent')
+  const drafts = visible
+    .filter((i) => !i.archived && i.status !== 'sent')
+    .sort(byScheduledAsc)
   const sent = visible.filter((i) => !i.archived && i.status === 'sent')
-  const archived = visible.filter((i) => i.archived)
+  const archived = visible.filter((i) => i.archived).sort(bySentDesc)
 
   async function createDraft() {
     const ref = await addDoc(collection(db, 'pressReleases'), {
