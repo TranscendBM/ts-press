@@ -80,7 +80,18 @@ export default function SendPage() {
 
   /** 已封存的新聞稿不能發送，從下拉選單排除；直接用網址帶封存稿件的 id 進來也一併擋掉。 */
   const sendablePresses = useMemo(
-    () => presses.filter((p) => !p.archived),
+    () =>
+      presses
+        .filter((p) => !p.archived)
+        // 依計畫發送日期由近到遠；沒排定日期的排最後，再依更新時間新到舊
+        .sort((a, b) => {
+          if (a.scheduledDate && b.scheduledDate) {
+            return a.scheduledDate.localeCompare(b.scheduledDate)
+          }
+          if (a.scheduledDate) return -1
+          if (b.scheduledDate) return 1
+          return (b.updatedAt?.toMillis?.() ?? 0) - (a.updatedAt?.toMillis?.() ?? 0)
+        }),
     [presses],
   )
 
