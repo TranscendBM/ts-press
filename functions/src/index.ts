@@ -33,9 +33,21 @@ import {
   evaluateAccess,
   expandInternalCopies,
   isAllowedAttachmentPath,
+  isAllowedPressFilePath,
   parseEmailList,
+  SEND_BATCH_LIMIT,
   type AppRole,
 } from './policy.generated'
+import {
+  collectPressFilePaths,
+  deletePressReleaseWithCleanup,
+} from './pressCleanup.generated'
+import {
+  decideCampaignResume,
+  decideCampaignStatus,
+  isValidIdempotencyKey,
+  selectRecipientsToProcess,
+} from './campaignSend.generated'
 
 interface AuthorizedUser {
   email: string
@@ -208,6 +220,14 @@ interface SendRequest {
   pressReleaseId: string
   targetLists?: string[]
   mode: SendMode
+  /**
+   * 前端在同一次「發送」互動中固定不變的識別碼（例如確認視窗開啟時產生一次
+   * UUID，重試沿用同一個）。有帶且格式正確時，campaign 文件 ID 就直接用
+   * 這個值 —— 同一個 idempotencyKey 重複呼叫不會建立第二個 campaign，
+   * 也不會重寄已經成功的收件人（見下方 sendPendingRecipients）。
+   * 沒帶就沿用原本的自動 ID 行為，不保證重試安全。
+   */
+  idempotencyKey?: string
 }
 
 /**
@@ -372,10 +392,177 @@ async function loadAttachments(
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+interface RecipientDoc {
+  email: string
+  name: string
+  outlet: string
+  language: Language
+  status: 'queued' | 'sending' | 'sent' | 'failed'
+}
+
+interface CampaignPress {
+  title: string
+  category: string
+  releaseDate?: string
+  versions: Record<Language, Version>
+}
+
+interface CampaignEmailSettings {
+  logoUrl?: string
+  contacts?: Record<Language, PressContact>
+  about?: Record<Language, { text?: string; link?: string }>
+}
+
+/**
+ * 寄送一個 campaign 底下所有還沒確認送出（status !== 'sent'）的收件人。
+ * sendCampaign（第一次建立）與 retryCampaign（接續未完成的）共用同一份邏輯 ——
+ * 兩者的差異只在於「要不要先建立收件人紀錄」，實際寄送的規則必須一致，
+ * 否則兩條路徑各自處理容易產生「這裡防過的競態那裡沒防到」的落差。
+ *
+ * 每一位在真正呼叫 sendMail 前，都先用 transaction 原子性地把狀態從
+ * 非 sent 搶成 sending —— 這樣同一位收件人不會因為函式被重複呼叫
+ * （手動重試、或 sendCampaign 與 retryCampaign 剛好交疊）而收到兩封信。
+ *
+ * 一次最多實際處理 SEND_BATCH_LIMIT 位，其餘留在原本的狀態，
+ * 由回傳的 remaining 告訴呼叫端「還沒寄完，可以呼叫 retryCampaign 接著寄」。
+ */
+async function sendPendingRecipients(opts: {
+  campaignRef: FirebaseFirestore.DocumentReference
+  press: CampaignPress
+  emailSettings: CampaignEmailSettings
+  settings: SmtpSettings
+  transporter: nodemailer.Transporter
+  attachments: Awaited<ReturnType<typeof loadAttachments>>
+  isTest: boolean
+}): Promise<{
+  totals: { recipients: number; sent: number; failed: number }
+  remaining: number
+}> {
+  const beforeSnap = await opts.campaignRef.collection('recipients').get()
+  // queued／sending／failed 都算「還沒確認寄出」，一律當作可以（重新）嘗試 ——
+  // 卡在 sending 通常代表上一次呼叫在寄送途中被中斷，內容從沒送到 SMTP
+  // 伺服器手上就中止的機率遠高於已經送出，用「可能沒收到」重寄，
+  // 比讓它永遠卡住、誰都補不了安全。純決策邏輯（誰要處理、上限怎麼切）
+  // 抽在 selectRecipientsToProcess，這裡只負責照著清單實際去做。
+  const { toProcess: toProcessIds } = selectRecipientsToProcess(
+    beforeSnap.docs.map((d) => ({ id: d.id, status: d.data().status })),
+    SEND_BATCH_LIMIT,
+  )
+  const byId = new Map(beforeSnap.docs.map((d) => [d.id, d]))
+  const toProcess = toProcessIds
+    .map((id) => byId.get(id))
+    .filter((d): d is FirebaseFirestore.QueryDocumentSnapshot => !!d)
+
+  for (const recDoc of toProcess) {
+    const claimed = await db.runTransaction(async (tx) => {
+      const fresh = await tx.get(recDoc.ref)
+      if (!fresh.exists || fresh.data()?.status === 'sent') return null
+      tx.update(recDoc.ref, { status: 'sending' })
+      return fresh.data() as RecipientDoc
+    })
+    if (!claimed) continue
+
+    const r = claimed
+    const version = opts.press.versions[r.language]
+    const templateInput = {
+      subject: version.subject ?? '',
+      bodyText: version.bodyText ?? '',
+      heroImageUrl: version.heroImage?.url,
+      recipientName: r.name,
+      language: r.language,
+      releaseDate: opts.press.releaseDate,
+      logoUrl: opts.emailSettings.logoUrl,
+      contact: opts.emailSettings.contacts?.[r.language],
+      about: opts.emailSettings.about?.[r.language]?.text,
+      aboutLink: opts.emailSettings.about?.[r.language]?.link,
+    }
+    try {
+      await opts.transporter.sendMail({
+        to: r.name ? `"${r.name.replace(/"/g, '')}" <${r.email}>` : r.email,
+        from: `"${SENDER_NAME_BY_LANG[r.language]}" <${opts.settings.fromEmail}>`,
+        replyTo: opts.settings.replyTo,
+        // 郵件主旨標頭不能含換行，主旨的手動斷行只在信件內文/Word/PDF 呈現
+        subject: `${opts.isTest ? '[測試] ' : ''}${subjectSingleLine(version.subject ?? '')}`,
+        // 測試信加上標頭，萬一誤轉寄也看得出不是正式發稿
+        headers: opts.isTest ? { 'X-Press-Center-Test': 'true' } : undefined,
+        text: renderEmailText(templateInput),
+        html: renderEmailHtml(templateInput),
+        attachments: opts.attachments,
+      })
+      await recDoc.ref.update({ status: 'sent' })
+    } catch (err) {
+      const detail = (err as { message?: string }).message ?? '寄送失敗'
+      logger.error('寄送失敗', { email: r.email, detail })
+      await recDoc.ref.update({ status: 'failed', error: detail })
+    }
+    // 逐封稍作間隔，避免 mail2000 判定為濫發而阻擋
+    await sleep(400)
+  }
+
+  // 處理完後重新查一次算總數，而不是自己累計 ——
+  // 這樣不論是全新寄送還是接續之前的進度，統計永遠反映資料庫的真實狀態。
+  const afterSnap = await opts.campaignRef.collection('recipients').get()
+  let sent = 0
+  let failed = 0
+  for (const d of afterSnap.docs) {
+    const status = d.data().status
+    if (status === 'sent') sent += 1
+    else if (status === 'failed') failed += 1
+  }
+  const total = afterSnap.docs.length
+  return {
+    totals: { recipients: total, sent, failed },
+    remaining: total - sent - failed,
+  }
+}
+
+/**
+ * 依寄送結果收尾：更新 campaign 狀態，任何情況都不會停在 sending。
+ *
+ * - remaining > 0（撞到單批上限）→ partial，可以呼叫 retryCampaign 接著寄
+ * - 全部處理完但通通失敗 → failed
+ * - 其餘（至少一封成功，或原本就沒有收件人）→ completed
+ */
+async function finalizeCampaign(
+  campaignRef: FirebaseFirestore.DocumentReference,
+  totals: { recipients: number; sent: number; failed: number },
+  remaining: number,
+): Promise<'partial' | 'completed' | 'failed'> {
+  const status = decideCampaignStatus(totals, remaining)
+  await campaignRef.update({
+    status,
+    'totals.sent': totals.sent,
+    'totals.failed': totals.failed,
+    updatedAt: FieldValue.serverTimestamp(),
+    ...(status === 'partial' ? {} : { completedAt: FieldValue.serverTimestamp() }),
+  })
+  return status
+}
+
+/** 任何未預期的例外都要讓 campaign 落在 failed，不能永遠停在 sending。 */
+async function markCampaignFailed(
+  campaignRef: FirebaseFirestore.DocumentReference,
+  err: unknown,
+) {
+  try {
+    await campaignRef.update({
+      status: 'failed',
+      lastError: (err as Error)?.message ?? '未知錯誤',
+      updatedAt: FieldValue.serverTimestamp(),
+      completedAt: FieldValue.serverTimestamp(),
+    })
+  } catch (updateErr) {
+    // 連這次更新都失敗就只能記 log；campaign 會停在 sending，
+    // 但 lastError 至少有機會在下次成功的更新時被看到。
+    logger.error('標記 campaign 失敗狀態時也失敗了', { updateErr })
+  }
+}
+
 export const sendCampaign = onCall<SendRequest>(
   { secrets: [SMTP_PASS], timeoutSeconds: 540, memory: '512MiB' },
   async (request) => {
-    const { pressReleaseId, targetLists, mode } = request.data ?? {}
+    const { pressReleaseId, targetLists, mode, idempotencyKey } =
+      request.data ?? {}
     if (!pressReleaseId) {
       throw new HttpsError('invalid-argument', '缺少新聞稿 ID。')
     }
@@ -415,123 +602,324 @@ export const sendCampaign = onCall<SendRequest>(
         internalCopies?: Record<string, string>
       })
 
-    /** 依名單展開收件人，同一個 email 只留一份。 */
-    async function expandLists(lists: string[]): Promise<Contact[]> {
-      const contactsSnap = await db.collection('mediaContacts').get()
-      const byEmail = new Map<string, Contact>()
-      for (const doc of contactsSnap.docs) {
-        const c = { id: doc.id, ...doc.data() } as Contact
-        if (c.active === false) continue
-        if (!(c.lists ?? []).some((l) => lists.includes(l))) continue
-        if (!byEmail.has(c.email)) byEmail.set(c.email, c)
-      }
-      return Array.from(byEmail.values())
+    // 有帶合法的 idempotencyKey 就直接當 campaign 文件 ID —— 同一個 key
+    // 重複呼叫（手動重試、網路重送）都會落在同一份文件上，不會建第二個。
+    const campaignRef = isValidIdempotencyKey(idempotencyKey)
+      ? db.collection('campaigns').doc(idempotencyKey)
+      : db.collection('campaigns').doc()
+
+    const existingSnap = await campaignRef.get()
+    const existing = existingSnap.exists
+      ? (existingSnap.data() as {
+          pressReleaseId?: string
+          mode?: SendMode
+          targetLists?: string[]
+          status?: string
+          totals?: { recipients?: number }
+        })
+      : undefined
+    // 純決策邏輯抽在 decideCampaignResume：同一個 idempotencyKey 重複呼叫
+    // 該不該重建、該不該重跑、該不該直接擋下，都在那裡集中判斷、集中測試。
+    const resumeDecision = decideCampaignResume(existing, { pressReleaseId, mode })
+    if (resumeDecision.action === 'reject') {
+      throw new HttpsError('invalid-argument', resumeDecision.reason)
     }
 
-    let recipients: Contact[] = []
     let effectiveLists: string[] = []
+    let recipientsCount = 0
 
-    // 已填寫（主旨＋內文都有）的語言版本。兩種測試模式都據此決定要寄哪幾版。
-    const filledLangs = LANGUAGES.filter((l) => {
-      const v = press.versions?.[l]
-      return !!(v?.subject?.trim() && v?.bodyText?.trim())
-    })
-
-    if (mode === 'self') {
-      if (filledLangs.length === 0) {
-        throw new HttpsError('failed-precondition', '沒有任何已填寫的語言版本。')
+    if (resumeDecision.action === 'return-existing-result') {
+      // 已經跑完了（不論成敗），直接回傳當時的結果，不重跑一次
+      return {
+        campaignId: campaignRef.id,
+        recipients: existing?.totals?.recipients ?? 0,
+        status: existing?.status as 'completed' | 'failed',
       }
-      // 測試信收件人：登入者本人 + 後台「測試信收件人」設定的信箱，去重
-      const extras = parseEmailList(
-        (await db.doc('settings/smtp').get()).data()?.testRecipients,
-      )
-      const seen = new Set<string>()
-      const emails: string[] = []
-      for (const e of [user.email, ...extras]) {
-        const key = e.toLowerCase()
-        if (!seen.has(key)) {
-          seen.add(key)
-          emails.push(e)
+    } else if (resumeDecision.action === 'resume') {
+      // 同一個 idempotencyKey 之前呼叫過、還在進行中：不重建收件人，直接接續寄。
+      effectiveLists = existing?.targetLists ?? []
+      recipientsCount = existing?.totals?.recipients ?? 0
+    } else {
+      /** 依名單展開收件人，同一個 email 只留一份。 */
+      async function expandLists(lists: string[]): Promise<Contact[]> {
+        const contactsSnap = await db.collection('mediaContacts').get()
+        const byEmail = new Map<string, Contact>()
+        for (const doc of contactsSnap.docs) {
+          const c = { id: doc.id, ...doc.data() } as Contact
+          if (c.active === false) continue
+          if (!(c.lists ?? []).some((l) => lists.includes(l))) continue
+          if (!byEmail.has(c.email)) byEmail.set(c.email, c)
+        }
+        return Array.from(byEmail.values())
+      }
+
+      let recipients: Contact[] = []
+
+      // 已填寫（主旨＋內文都有）的語言版本。兩種測試模式都據此決定要寄哪幾版。
+      const filledLangs = LANGUAGES.filter((l) => {
+        const v = press.versions?.[l]
+        return !!(v?.subject?.trim() && v?.bodyText?.trim())
+      })
+
+      if (mode === 'self') {
+        if (filledLangs.length === 0) {
+          throw new HttpsError('failed-precondition', '沒有任何已填寫的語言版本。')
+        }
+        // 測試信收件人：登入者本人 + 後台「測試信收件人」設定的信箱，去重
+        const extras = parseEmailList(
+          (await db.doc('settings/smtp').get()).data()?.testRecipients,
+        )
+        const seen = new Set<string>()
+        const emails: string[] = []
+        for (const e of [user.email, ...extras]) {
+          const key = e.toLowerCase()
+          if (!seen.has(key)) {
+            seen.add(key)
+            emails.push(e)
+          }
+        }
+        // 每個已填語言版本 × 每個收件人各寄一封
+        recipients = filledLangs.flatMap((l) =>
+          emails.map((email, idx) => ({
+            id: `self_${l}_${idx}`,
+            name: user.displayName ?? '',
+            email,
+            outlet: '（測試信）',
+            language: l,
+          })),
+        )
+      } else if (mode === 'testList') {
+        effectiveLists = [TEST_LIST_ID]
+        const members = await expandLists(effectiveLists)
+        if (members.length === 0) {
+          throw new HttpsError(
+            'failed-precondition',
+            '測試名單沒有任何聯絡人，請先到媒體名單把同仁加進「測試名單」。',
+          )
+        }
+        if (filledLangs.length === 0) {
+          throw new HttpsError('failed-precondition', '沒有任何已填寫的語言版本。')
+        }
+        // 測試名單每位成員都收到「所有已填寫的語言版本」，
+        // 不看成員自己的語言設定 —— 這樣一次就能核對 tw／www／us 三版。
+        recipients = members.flatMap((m) =>
+          filledLangs.map((l) => ({ ...m, id: `${m.id}_${l}`, language: l })),
+        )
+      } else {
+        // 正式發送：測試名單一律排除，避免內部信箱混進真實發稿
+        effectiveLists = (targetLists ?? []).filter((l) => l !== TEST_LIST_ID)
+        if (effectiveLists.length === 0) {
+          throw new HttpsError('invalid-argument', '請至少勾選一個媒體名單。')
+        }
+        recipients = await expandLists(effectiveLists)
+        if (recipients.length === 0) {
+          throw new HttpsError('failed-precondition', '勾選的名單沒有任何收件人。')
+        }
+
+        // 內部副本：正式發送時，把設定裡對應名單的公司同事一併寄送。
+        // 每人只收一份 —— 跨名單、與媒體收件人重複都在 expandInternalCopies 去重。
+        const copies = expandInternalCopies(
+          emailSettings.internalCopies,
+          effectiveLists,
+          recipients.map((r) => r.email),
+        )
+        copies.forEach(({ email, list }, i) => {
+          const lang = LIST_LANGUAGE[list]
+          if (!lang) return
+          recipients.push({
+            id: `internal_${i}`,
+            name: '',
+            email,
+            outlet: '（內部副本）',
+            language: lang,
+          })
+        })
+      }
+
+      if (mode !== 'self') {
+        // 有人要收的語言版本一定要填完，否則整批擋下
+        const missing = LANGUAGES.filter(
+          (l) =>
+            recipients.some((r) => r.language === l) &&
+            !(
+              press.versions?.[l]?.subject?.trim() &&
+              press.versions?.[l]?.bodyText?.trim()
+            ),
+        )
+        if (missing.length > 0) {
+          throw new HttpsError(
+            'failed-precondition',
+            `以下語言版本尚未填寫完整：${missing.join('、')}`,
+          )
         }
       }
-      // 每個已填語言版本 × 每個收件人各寄一封
-      recipients = filledLangs.flatMap((l) =>
-        emails.map((email, idx) => ({
-          id: `self_${l}_${idx}`,
-          name: user.displayName ?? '',
-          email,
-          outlet: '（測試信）',
-          language: l,
-        })),
-      )
-    } else if (mode === 'testList') {
-      effectiveLists = [TEST_LIST_ID]
-      const members = await expandLists(effectiveLists)
-      if (members.length === 0) {
-        throw new HttpsError(
-          'failed-precondition',
-          '測試名單沒有任何聯絡人，請先到媒體名單把同仁加進「測試名單」。',
-        )
-      }
-      if (filledLangs.length === 0) {
-        throw new HttpsError('failed-precondition', '沒有任何已填寫的語言版本。')
-      }
-      // 測試名單每位成員都收到「所有已填寫的語言版本」，
-      // 不看成員自己的語言設定 —— 這樣一次就能核對 tw／www／us 三版。
-      recipients = members.flatMap((m) =>
-        filledLangs.map((l) => ({ ...m, id: `${m.id}_${l}`, language: l })),
-      )
-    } else {
-      // 正式發送：測試名單一律排除，避免內部信箱混進真實發稿
-      effectiveLists = (targetLists ?? []).filter((l) => l !== TEST_LIST_ID)
-      if (effectiveLists.length === 0) {
-        throw new HttpsError('invalid-argument', '請至少勾選一個媒體名單。')
-      }
-      recipients = await expandLists(effectiveLists)
-      if (recipients.length === 0) {
-        throw new HttpsError('failed-precondition', '勾選的名單沒有任何收件人。')
-      }
 
-      // 內部副本：正式發送時，把設定裡對應名單的公司同事一併寄送。
-      // 每人只收一份 —— 跨名單、與媒體收件人重複都在 expandInternalCopies 去重。
-      const copies = expandInternalCopies(
-        emailSettings.internalCopies,
-        effectiveLists,
-        recipients.map((r) => r.email),
-      )
-      copies.forEach(({ email, list }, i) => {
-        const lang = LIST_LANGUAGE[list]
-        if (!lang) return
-        recipients.push({
-          id: `internal_${i}`,
-          name: '',
-          email,
-          outlet: '（內部副本）',
-          language: lang,
-        })
+      // 先建立紀錄，讓前端可以即時看到進度
+      await campaignRef.set({
+        pressReleaseId,
+        pressTitle: press.title,
+        category: press.category,
+        targetLists: effectiveLists,
+        mode,
+        isTest,
+        sentBy: user.email,
+        sentAt: FieldValue.serverTimestamp(),
+        startedAt: FieldValue.serverTimestamp(),
+        status: 'sending',
+        totals: { recipients: recipients.length, sent: 0, failed: 0 },
       })
-    }
 
-    if (mode !== 'self') {
-      // 有人要收的語言版本一定要填完，否則整批擋下
-      const missing = LANGUAGES.filter(
-        (l) =>
-          recipients.some((r) => r.language === l) &&
-          !(
-            press.versions?.[l]?.subject?.trim() &&
-            press.versions?.[l]?.bodyText?.trim()
-          ),
-      )
-      if (missing.length > 0) {
+      // Firestore batch 一次上限 500 筆，收件人多時要分批
+      try {
+        for (const group of chunk(recipients)) {
+          const batch = db.batch()
+          for (const r of group) {
+            batch.set(campaignRef.collection('recipients').doc(r.id), {
+              contactId: r.id,
+              email: r.email,
+              name: r.name,
+              outlet: r.outlet ?? '',
+              language: r.language,
+              status: 'queued',
+            })
+          }
+          await batch.commit()
+        }
+      } catch (err) {
+        // 不能讓 campaign 永遠停在 sending，否則畫面會一直轉圈
+        logger.error('建立收件人紀錄失敗', err)
+        await markCampaignFailed(campaignRef, err)
         throw new HttpsError(
-          'failed-precondition',
-          `以下語言版本尚未填寫完整：${missing.join('、')}`,
+          'internal',
+          '建立收件人紀錄失敗，尚未寄出任何信件，請稍後再試。',
         )
       }
+      recipientsCount = recipients.length
     }
 
     const attachments = await loadAttachments(press.attachments, pressReleaseId)
+    const settings = await readSmtpSettings()
+    const transporter = await createTransport(settings, await readSmtpPassword())
 
+    try {
+      await transporter.verify()
+    } catch (err) {
+      logger.error('SMTP 連線失敗', err)
+      await markCampaignFailed(campaignRef, err)
+      throw new HttpsError(
+        'unavailable',
+        `SMTP 伺服器連線失敗：${(err as Error).message}`,
+      )
+    }
+
+    let status: 'partial' | 'completed' | 'failed'
+    try {
+      const { totals, remaining } = await sendPendingRecipients({
+        campaignRef,
+        press,
+        emailSettings,
+        settings,
+        transporter,
+        attachments,
+        isTest,
+      })
+      status = await finalizeCampaign(campaignRef, totals, remaining)
+    } catch (err) {
+      // 寄送迴圈本身不該拋錯（單封失敗已經在迴圈內接住），這裡是防禦
+      // 未預期的例外（例如 Firestore 忽然打不通）——一定要讓狀態落地，
+      // 不能讓 campaign 卡在 sending 轉圈轉到天荒地老。
+      logger.error('寄送過程發生未預期錯誤', err)
+      await markCampaignFailed(campaignRef, err)
+      throw new HttpsError(
+        'internal',
+        `寄送過程發生錯誤，已停止：${(err as Error).message}`,
+      )
+    } finally {
+      transporter.close()
+    }
+
+    if (!isTest && status !== 'partial') {
+      const finalSnap = await campaignRef.get()
+      const finalTotals = finalSnap.data()?.totals as
+        | { sent?: number }
+        | undefined
+      if ((finalTotals?.sent ?? 0) > 0) {
+        await db
+          .collection('pressReleases')
+          .doc(pressReleaseId)
+          // sentAt 供「發送排程」看板顯示實際發送時間，對照計畫日期
+          .update({ status: 'sent', sentAt: FieldValue.serverTimestamp() })
+      }
+    }
+
+    return { campaignId: campaignRef.id, recipients: recipientsCount, status }
+  },
+)
+
+/**
+ * 接續一個尚未完成（partial 或卡在 sending）的 campaign，
+ * 只處理還沒確認寄出的收件人 —— 已經是 sent 的一律跳過，不會重複寄送。
+ *
+ * 用途：sendCampaign 因為撞到 SEND_BATCH_LIMIT 而提早停下（partial），
+ * 或某次呼叫中途中斷、卡在 sending 太久，都可以呼叫這支繼續寄完。
+ */
+export const retryCampaign = onCall<{ campaignId: string }>(
+  { secrets: [SMTP_PASS], timeoutSeconds: 540, memory: '512MiB' },
+  async (request) => {
+    const campaignId = request.data?.campaignId
+    if (!campaignId || typeof campaignId !== 'string' || campaignId.includes('/')) {
+      throw new HttpsError('invalid-argument', 'campaign ID 不正確。')
+    }
+
+    const campaignRef = db.collection('campaigns').doc(campaignId)
+    const snap = await campaignRef.get()
+    if (!snap.exists) {
+      throw new HttpsError('not-found', '找不到這筆發送紀錄。')
+    }
+    const campaign = snap.data() as {
+      pressReleaseId: string
+      mode: SendMode
+      isTest: boolean
+      status: string
+    }
+
+    // 與 sendCampaign 相同的權限分野：正式發送要 sendReal，測試類要 sendTest
+    await requirePermission(
+      request.auth,
+      campaign.mode === 'real' ? 'sendReal' : 'sendTest',
+    )
+
+    if (campaign.status === 'completed' || campaign.status === 'failed') {
+      return { ok: true, status: campaign.status as 'completed' | 'failed' }
+    }
+
+    const pressSnap = await db
+      .collection('pressReleases')
+      .doc(campaign.pressReleaseId)
+      .get()
+    if (!pressSnap.exists) {
+      await markCampaignFailed(campaignRef, new Error('新聞稿已被刪除'))
+      throw new HttpsError('not-found', '找不到這篇新聞稿，無法繼續寄送。')
+    }
+    const press = pressSnap.data() as {
+      title: string
+      category: string
+      releaseDate?: string
+      versions: Record<Language, Version>
+      attachments?: { name: string; path: string; contentType?: string }[]
+    }
+    const emailSettings =
+      (await db.doc('settings/email').get()).data() ??
+      ({} as {
+        logoUrl?: string
+        contacts?: Record<Language, PressContact>
+        about?: Record<Language, { text?: string; link?: string }>
+      })
+
+    const attachments = await loadAttachments(
+      press.attachments,
+      campaign.pressReleaseId,
+    )
     const settings = await readSmtpSettings()
     const transporter = await createTransport(settings, await readSmtpPassword())
 
@@ -545,115 +933,43 @@ export const sendCampaign = onCall<SendRequest>(
       )
     }
 
-    // 先建立紀錄，讓前端可以即時看到進度
-    const campaignRef = db.collection('campaigns').doc()
-    await campaignRef.set({
-      pressReleaseId,
-      pressTitle: press.title,
-      category: press.category,
-      targetLists: effectiveLists,
-      mode,
-      isTest,
-      sentBy: user.email,
-      sentAt: FieldValue.serverTimestamp(),
-      status: 'sending',
-      totals: { recipients: recipients.length, sent: 0, failed: 0 },
-    })
-
-    // Firestore batch 一次上限 500 筆，收件人多時要分批
+    let status: 'partial' | 'completed' | 'failed'
     try {
-      for (const group of chunk(recipients)) {
-        const batch = db.batch()
-        for (const r of group) {
-          batch.set(campaignRef.collection('recipients').doc(r.id), {
-            contactId: r.id,
-            email: r.email,
-            name: r.name,
-            outlet: r.outlet ?? '',
-            language: r.language,
-            status: 'queued',
-          })
-        }
-        await batch.commit()
-      }
-    } catch (err) {
-      // 不能讓 campaign 永遠停在 sending，否則畫面會一直轉圈
-      logger.error('建立收件人紀錄失敗', err)
-      await campaignRef.update({
-        status: 'failed',
-        error: `建立收件人紀錄失敗：${(err as Error).message}`,
+      const { totals, remaining } = await sendPendingRecipients({
+        campaignRef,
+        press,
+        emailSettings,
+        settings,
+        transporter,
+        attachments,
+        isTest: campaign.isTest,
       })
+      status = await finalizeCampaign(campaignRef, totals, remaining)
+    } catch (err) {
+      logger.error('重試寄送過程發生未預期錯誤', err)
+      await markCampaignFailed(campaignRef, err)
       throw new HttpsError(
         'internal',
-        '建立收件人紀錄失敗，尚未寄出任何信件，請稍後再試。',
+        `重試寄送發生錯誤，已停止：${(err as Error).message}`,
       )
+    } finally {
+      transporter.close()
     }
 
-    let sent = 0
-    let failed = 0
-
-    // 逐封寄送並稍作間隔，避免 mail2000 判定為濫發而阻擋
-    for (const r of recipients) {
-      const version = press.versions[r.language]
-      const templateInput = {
-        subject: version.subject ?? '',
-        bodyText: version.bodyText ?? '',
-        heroImageUrl: version.heroImage?.url,
-        recipientName: r.name,
-        language: r.language,
-        releaseDate: press.releaseDate,
-        logoUrl: emailSettings.logoUrl,
-        contact: emailSettings.contacts?.[r.language],
-        about: emailSettings.about?.[r.language]?.text,
-        aboutLink: emailSettings.about?.[r.language]?.link,
+    if (!campaign.isTest && status !== 'partial') {
+      const finalSnap = await campaignRef.get()
+      const finalTotals = finalSnap.data()?.totals as
+        | { sent?: number }
+        | undefined
+      if ((finalTotals?.sent ?? 0) > 0) {
+        await db
+          .collection('pressReleases')
+          .doc(campaign.pressReleaseId)
+          .update({ status: 'sent', sentAt: FieldValue.serverTimestamp() })
       }
-      try {
-        await transporter.sendMail({
-          to: r.name ? `"${r.name.replace(/"/g, '')}" <${r.email}>` : r.email,
-          from: `"${SENDER_NAME_BY_LANG[r.language]}" <${settings.fromEmail}>`,
-          replyTo: settings.replyTo,
-          // 郵件主旨標頭不能含換行，主旨的手動斷行只在信件內文/Word/PDF 呈現
-          subject: `${isTest ? '[測試] ' : ''}${subjectSingleLine(version.subject ?? '')}`,
-          // 測試信加上標頭，萬一誤轉寄也看得出不是正式發稿
-          headers: isTest ? { 'X-Press-Center-Test': 'true' } : undefined,
-          text: renderEmailText(templateInput),
-          html: renderEmailHtml(templateInput),
-          attachments,
-        })
-        sent += 1
-        await campaignRef
-          .collection('recipients')
-          .doc(r.id)
-          .update({ status: 'sent' })
-      } catch (err) {
-        failed += 1
-        const detail = (err as { message?: string }).message ?? '寄送失敗'
-        logger.error('寄送失敗', { email: r.email, detail })
-        await campaignRef
-          .collection('recipients')
-          .doc(r.id)
-          .update({ status: 'failed', error: detail })
-      }
-      await sleep(400)
     }
 
-    transporter.close()
-
-    await campaignRef.update({
-      status: failed === recipients.length ? 'failed' : 'completed',
-      'totals.sent': sent,
-      'totals.failed': failed,
-    })
-
-    if (!isTest && sent > 0) {
-      await db
-        .collection('pressReleases')
-        .doc(pressReleaseId)
-        // sentAt 供「發送排程」看板顯示實際發送時間，對照計畫日期
-        .update({ status: 'sent', sentAt: FieldValue.serverTimestamp() })
-    }
-
-    return { campaignId: campaignRef.id, recipients: recipients.length }
+    return { ok: true, status }
   },
 )
 
@@ -917,6 +1233,100 @@ export const deleteMediaEvent = onCall<{ eventId: string }>(
     }
 
     return { ok: true, participantsRemoved: removed }
+  },
+)
+
+/**
+ * 刪除新聞稿，並負責清掉它引用的 Storage 檔案（附件與各語言版本的 hero 圖）。
+ *
+ * 一律「先刪 Firestore 文件、確認成功後才刪 Storage 檔案」——
+ * 前端過去是自己先刪 Storage 再刪 Firestore 文件，一旦後者失敗，文件會留著
+ * 但引用的檔案已經不存在，記者收到的附件連結、後台下載連結都會壞掉。
+ * 顛倒過來後，最壞情況只是留下孤兒檔案（不影響任何功能），而且清理失敗的
+ * 檔案會記進 storageCleanupQueue，之後可以查詢、重試，不會無聲消失。
+ */
+export const deletePressRelease = onCall<{ pressReleaseId: string }>(
+  { timeoutSeconds: 120 },
+  async (request) => {
+    const user = await requirePermission(request.auth, 'editPress')
+    const pressReleaseId = request.data?.pressReleaseId
+    if (
+      !pressReleaseId ||
+      typeof pressReleaseId !== 'string' ||
+      pressReleaseId.includes('/')
+    ) {
+      throw new HttpsError('invalid-argument', '新聞稿 ID 不正確。')
+    }
+
+    const pressRef = db.collection('pressReleases').doc(pressReleaseId)
+    const snap = await pressRef.get()
+    if (!snap.exists) {
+      // 已經被刪過了：視為成功（重試時不該因為「已經達成目標狀態」而報錯）
+      return { ok: true, filesRemoved: [] as string[], cleanupQueued: [] as string[] }
+    }
+
+    const press = snap.data() as {
+      attachments?: { path?: string }[]
+      versions?: Record<string, { heroImage?: { path?: string } } | undefined>
+    }
+
+    // 只清除確實屬於這篇新聞稿目錄底下的路徑 —— 就算文件內容被竄改過，
+    // 也不會誤刪或誤查其他新聞稿的檔案。
+    const candidatePaths = collectPressFilePaths(press)
+    const paths = candidatePaths.filter(
+      (p) =>
+        isAllowedPressFilePath(p, pressReleaseId, 'attachments') ||
+        isAllowedPressFilePath(p, pressReleaseId, 'hero'),
+    )
+    if (paths.length !== candidatePaths.length) {
+      logger.warn('新聞稿文件內含不合法的檔案路徑，已略過', {
+        pressReleaseId,
+        candidatePaths,
+      })
+    }
+
+    const bucket = getStorage().bucket()
+
+    try {
+      const { removed, queued } = await deletePressReleaseWithCleanup(paths, {
+        deleteDoc: async () => {
+          await pressRef.delete()
+        },
+        deleteFile: async (path) => {
+          try {
+            await bucket.file(path).delete()
+          } catch (err) {
+            // 檔案本來就不存在代表目標狀態已經達成，不算失敗
+            if ((err as { code?: number }).code === 404) return
+            throw err
+          }
+        },
+        queueRetry: async (path, errorMessage) => {
+          await db.collection('storageCleanupQueue').add({
+            path,
+            pressReleaseId,
+            error: errorMessage,
+            createdAt: FieldValue.serverTimestamp(),
+            status: 'pending',
+          })
+        },
+      })
+      logger.info('已刪除新聞稿', {
+        pressReleaseId,
+        by: user.email,
+        filesRemoved: removed.length,
+        cleanupQueued: queued.length,
+      })
+      return { ok: true, filesRemoved: removed, cleanupQueued: queued }
+    } catch (err) {
+      // 這裡失敗一定是 deleteDoc() 本身失敗 —— 檔案完全沒有被動過，
+      // 文件也還在，資料狀態維持一致，可以直接請使用者重試。
+      logger.error('刪除新聞稿失敗', { pressReleaseId, err })
+      throw new HttpsError(
+        'internal',
+        `刪除新聞稿失敗：${(err as Error).message}`,
+      )
+    }
   },
 )
 

@@ -3,12 +3,12 @@ import { useNavigate } from 'react-router-dom'
 import {
   addDoc,
   collection,
-  deleteDoc,
   doc,
   onSnapshot,
   serverTimestamp,
   updateDoc,
 } from 'firebase/firestore'
+import { httpsCallable } from 'firebase/functions'
 import {
   Archive,
   ArchiveRestore,
@@ -17,19 +17,23 @@ import {
   Send,
   Trash2,
 } from 'lucide-react'
-import { db } from '../lib/firebase'
+import { db, functions } from '../lib/firebase'
 import { useAuth } from '../lib/AuthContext'
 import PageHeader from '../components/PageHeader'
 import { Badge, Button, EmptyState, Select } from '../components/ui'
-import {
-  CATEGORIES,
-  CATEGORY_LABELS,
-  LANGUAGES,
-  type Category,
-} from '../constants'
+import { CATEGORIES, CATEGORY_LABELS, LANGUAGES, type Category } from '../constants'
 import type { PressRelease } from '../types'
 import { blankVersions, formatDate, todayIso } from '../lib/helpers'
-import { deletePressFile, describeStorageError } from '../lib/storage'
+
+/**
+ * 刪除新聞稿一律走 Cloud Function，而不是前端自己先刪 Storage 再刪
+ * Firestore 文件 —— Function 會先確認文件刪除成功才動 Storage，中途失敗
+ * 最壞只留下孤兒檔案，不會留下「文件引用已刪除檔案」這種壞掉的參照。
+ */
+const deletePressReleaseFn = httpsCallable<
+  { pressReleaseId: string },
+  { ok: boolean; filesRemoved: string[]; cleanupQueued: string[] }
+>(functions, 'deletePressRelease')
 
 export default function PressListPage() {
   const [items, setItems] = useState<PressRelease[]>([])
@@ -133,24 +137,12 @@ export default function PressListPage() {
       return
     }
     setError('')
-    // 先清 Storage 再刪文件：反過來的話檔案路徑就查不到了，會變成孤兒檔案
-    const paths = [
-      ...(item.attachments ?? []).map((a) => a.path),
-      ...LANGUAGES.map((l) => item.versions?.[l]?.heroImage?.path),
-    ].filter((p): p is string => !!p)
-
     try {
-      for (const path of paths) await deletePressFile(path)
+      await deletePressReleaseFn({ pressReleaseId: item.id })
     } catch (err) {
       setError(
-        `刪除檔案失敗，新聞稿未刪除：${describeStorageError(err)}`,
+        `刪除新聞稿失敗：${(err as { message?: string }).message ?? '請稍後再試。'}`,
       )
-      return
-    }
-    try {
-      await deleteDoc(doc(db, 'pressReleases', item.id))
-    } catch (err) {
-      setError(`刪除新聞稿失敗：${(err as Error).message}`)
     }
   }
 

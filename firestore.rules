@@ -102,6 +102,62 @@ service cloud.firestore {
         && noPrivilegeEscalation(request.resource.data.roles);
     }
 
+    // ---- 動態權限矩陣的即時判斷 ----
+    //
+    // 這裡直接 get() settings/permissions 與 users/{email} 的即時內容，
+    // 不用 custom claims —— claims 寫進 JWT 後最長要一小時才會過期刷新，
+    // 管理員撤銷權限後使用者理論上還能用舊 token 繼續操作到過期為止。
+    // 直接讀 Firestore 的話，規則永遠比對「當下」的資料，撤銷立即生效，
+    // 不必處理任何 token 刷新的時序問題。這與既有的 isWhitelisted() /
+    // isAdmin() 用同一套機制，只是延伸到完整的權限矩陣。
+    //
+    // 必須與 shared/permissions.ts 的 DEFAULT_PERMISSIONS 保持一致，
+    // tests/firestoreRules.test.ts 會逐一比對兩邊，避免日後改一邊忘了改另一邊。
+
+    // 舊代號沿用 shared/permissions.ts 的 normalizeRole：'editor' 視為 'specialist'。
+    function normalizedRole() {
+      return userDoc().role == 'editor' ? 'specialist' : userDoc().role;
+    }
+
+    function isKnownRole(role) {
+      return role in ['admin', 'manager', 'specialist'];
+    }
+
+    // 對應 DEFAULT_PERMISSIONS：admin 全開；manager / specialist 各自的預設清單。
+    function defaultGrant(role, permission) {
+      return role == 'admin'
+        || (role == 'manager' && permission in ['viewPress', 'editPress', 'downloadPress', 'sendTest', 'sendReal', 'manageContacts', 'manageEvents', 'viewCampaigns'])
+        || (role == 'specialist' && permission in ['viewPress', 'editPress', 'downloadPress', 'manageContacts', 'manageEvents', 'viewCampaigns']);
+    }
+
+    // settings/permissions 不存在時視為「尚未覆寫」，一律套用預設矩陣。
+    function permissionOverrides() {
+      return exists(/databases/$(database)/documents/settings/permissions)
+        ? get(/databases/$(database)/documents/settings/permissions).data.roles
+        : null;
+    }
+
+    // 依角色與權限判斷，覆寫矩陣格式不合法時 fail closed（不猜測、不套預設）。
+    function hasPermForRole(role, permission) {
+      let overrides = permissionOverrides();
+      let overridesOk = overrides == null || validRolesMap(overrides);
+      return isKnownRole(role)
+        && overridesOk
+        && (
+          // manageUsers / manageSettings 只有 admin 能有，覆寫矩陣對這兩項無效 ——
+          // 與 shared/permissions.ts 的 ADMIN_ONLY_PERMISSIONS 邏輯一致
+          permission in ['manageUsers', 'manageSettings']
+            ? role == 'admin'
+            : (overrides != null && role in overrides && permission in overrides[role])
+              ? overrides[role][permission] == true
+              : defaultGrant(role, permission)
+        );
+    }
+
+    function hasPerm(permission) {
+      return isWhitelisted() && hasPermForRole(normalizedRole(), permission);
+    }
+
     /**
      * ⚠️ 這份文件的全部內容都是公開資訊 ⚠️
      *
@@ -129,32 +185,42 @@ service cloud.firestore {
             || isPublicHttpsUrl(request.resource.data.logoUrl));
     }
 
-    // 媒體名單：白名單使用者皆可維護
+    // 媒體名單：依 manageContacts 權限把關 ——
+    // 管理員撤銷這項權限後，就算使用者仍在白名單裡也不能再讀寫。
     match /mediaContacts/{id} {
-      allow read, write: if isWhitelisted();
+      allow read, write: if hasPerm('manageContacts');
     }
 
-    // 媒體關係經營：活動與每位媒體的參加／贈送紀錄
+    // 媒體關係經營：活動與每位媒體的參加／贈送紀錄，依 manageEvents 權限把關
     match /mediaEvents/{id} {
-      allow read, write: if isWhitelisted();
+      allow read, write: if hasPerm('manageEvents');
 
       match /participants/{contactId} {
-        allow read, write: if isWhitelisted();
+        allow read, write: if hasPerm('manageEvents');
       }
     }
 
-    // 新聞稿：白名單使用者皆可編輯
+    // 新聞稿：讀取需要 viewPress，新增／修改／刪除需要 editPress ——
+    // 兩者分開是因為權限矩陣允許某些角色只看不改。
     match /pressReleases/{id} {
-      allow read, write: if isWhitelisted();
+      allow read: if hasPerm('viewPress');
+      allow create, update, delete: if hasPerm('editPress');
     }
 
-    // 發送紀錄：只能讀，寫入一律由 Cloud Functions（Admin SDK）處理
+    // Storage 清理失敗時的重試佇列，只由 deletePressRelease（Admin SDK）寫入。
+    // 開放 admin 讀取是為了讓人可以查看還有哪些檔案清理失敗、需要人工處理。
+    match /storageCleanupQueue/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // 發送紀錄：讀取需要 viewCampaigns，寫入一律由 Cloud Functions（Admin SDK）處理
     match /campaigns/{id} {
-      allow read: if isWhitelisted();
+      allow read: if hasPerm('viewCampaigns');
       allow write: if false;
 
       match /recipients/{recipientId} {
-        allow read: if isWhitelisted();
+        allow read: if hasPerm('viewCampaigns');
         allow write: if false;
       }
     }

@@ -6,7 +6,9 @@ import {
   evaluateAccess,
   expandInternalCopies,
   isAllowedAttachmentPath,
+  isAllowedPressFilePath,
   parseEmailList,
+  SEND_BATCH_LIMIT,
 } from '../shared/policy'
 
 describe('evaluateAccess', () => {
@@ -157,6 +159,40 @@ describe('isAllowedAttachmentPath', () => {
   })
 })
 
+describe('isAllowedPressFilePath（hero 圖片，attachments 的邏輯已由上方涵蓋）', () => {
+  const id = 'abc123'
+
+  it('接受正確的 hero 路徑', () => {
+    expect(isAllowedPressFilePath(`press/${id}/hero/a.png`, id, 'hero')).toBe(
+      true,
+    )
+  })
+
+  it('拒絕其他新聞稿的 hero 路徑', () => {
+    expect(isAllowedPressFilePath(`press/other/hero/a.png`, id, 'hero')).toBe(
+      false,
+    )
+  })
+
+  it('拒絕資料夾對調（attachments 路徑不能當 hero 用，反之亦然）', () => {
+    expect(
+      isAllowedPressFilePath(`press/${id}/attachments/a.png`, id, 'hero'),
+    ).toBe(false)
+    expect(
+      isAllowedPressFilePath(`press/${id}/hero/a.png`, id, 'attachments'),
+    ).toBe(false)
+  })
+
+  it('拒絕路徑穿越與跨目錄層級', () => {
+    expect(
+      isAllowedPressFilePath(`press/${id}/hero/../../secret.txt`, id, 'hero'),
+    ).toBe(false)
+    expect(
+      isAllowedPressFilePath(`press/${id}/hero/sub/a.png`, id, 'hero'),
+    ).toBe(false)
+  })
+})
+
 describe('chunk', () => {
   it('批次大小不超過 Firestore 的 500 筆上限', () => {
     expect(BATCH_SIZE).toBeLessThanOrEqual(500)
@@ -188,6 +224,11 @@ describe('chunk', () => {
   it('批次大小不合法時丟錯', () => {
     expect(() => chunk([1, 2], 0)).toThrow()
     expect(() => chunk([1, 2], -1)).toThrow()
+  })
+
+  it('SEND_BATCH_LIMIT 留有安全餘裕（400ms 間隔 × 上限仍遠低於 540 秒 timeout）', () => {
+    expect(SEND_BATCH_LIMIT).toBeGreaterThan(0)
+    expect(SEND_BATCH_LIMIT * 0.4).toBeLessThan(540)
   })
 })
 

@@ -8,6 +8,20 @@ import { CATEGORY_LABELS, LIST_LABELS } from '../constants'
 import type { Campaign } from '../types'
 import { formatDate } from '../lib/helpers'
 
+const STATUS_LABELS: Record<Campaign['status'], string> = {
+  sending: '發送中',
+  partial: '尚未寄完',
+  completed: '已完成',
+  failed: '失敗',
+}
+
+const STATUS_TONES: Record<Campaign['status'], 'amber' | 'green' | 'red'> = {
+  sending: 'amber',
+  partial: 'amber',
+  completed: 'green',
+  failed: 'red',
+}
+
 export default function CampaignsPage() {
   const [items, setItems] = useState<Campaign[]>([])
   const [loading, setLoading] = useState(true)
@@ -104,20 +118,8 @@ export default function CampaignsPage() {
                         )}
                       </td>
                       <td className="px-4 py-3">
-                        <Badge
-                          tone={
-                            c.status === 'completed'
-                              ? 'green'
-                              : c.status === 'failed'
-                                ? 'red'
-                                : 'amber'
-                          }
-                        >
-                          {c.status === 'completed'
-                            ? '已完成'
-                            : c.status === 'failed'
-                              ? '失敗'
-                              : '發送中'}
+                        <Badge tone={STATUS_TONES[c.status]}>
+                          {STATUS_LABELS[c.status]}
                         </Badge>
                       </td>
                     </tr>

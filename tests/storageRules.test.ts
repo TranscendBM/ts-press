@@ -5,7 +5,7 @@ import {
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing'
 import { readFileSync } from 'node:fs'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, it } from 'vitest'
 import {
   deleteObject,
   ref,
@@ -16,29 +16,18 @@ import {
 /**
  * Storage 安全規則測試。
  *
- * 需要 Firebase 模擬器（本身需要 Java）。啟動方式：
- *   npx firebase emulators:start --only storage
- * 模擬器沒開時整組跳過，讓一般的單元測試仍能在沒有 Java 的機器上執行。
+ * 一律透過 `npm run test:rules` 執行（用 firebase emulators:exec 包住模擬
+ * 器，本身需要 Java）。刻意不做「模擬器沒開就 skip」的探測 —— 那樣 CI
+ * 忘記啟動模擬器時會被悄悄吞成一片綠燈，看起來像測試通過，實際上什麼都
+ * 沒驗證到。模擬器沒連上，initializeTestEnvironment() 會直接拋錯、
+ * 整組測試顯示失敗，這才是我們要的行為；一般的單元測試（`npm test` /
+ * `npm run test:unit`）已經用獨立的 vitest.config.ts 排除這個檔案，
+ * 沒裝 Java 的機器一樣能跑。
  */
 const HOST = '127.0.0.1'
 const PORT = 9199
 
-async function emulatorRunning() {
-  try {
-    // 只要連得上就代表模擬器在跑 —— Storage 模擬器的根路徑會回 501，
-    // 用 status < 500 判斷會把它誤判成沒啟動而整組跳過。
-    await fetch(`http://${HOST}:${PORT}/`, {
-      signal: AbortSignal.timeout(3000),
-    })
-    return true
-  } catch {
-    return false
-  }
-}
-
-const available = await emulatorRunning()
-
-describe.skipIf(!available)('storage.rules', () => {
+describe('storage.rules', () => {
   let env: RulesTestEnvironment
 
   const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
@@ -167,12 +156,5 @@ describe.skipIf(!available)('storage.rules', () => {
         uploadBytes(ref(editor(), 'random/other.png'), png, meta),
       )
     })
-  })
-})
-
-// 沒有模擬器時留一筆說明，避免整個檔案看起來沒有任何測試
-describe.skipIf(available)('storage.rules（略過）', () => {
-  it('需要 Firebase 模擬器，請先執行 npx firebase emulators:start --only storage', () => {
-    expect(available).toBe(false)
   })
 })

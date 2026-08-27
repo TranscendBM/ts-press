@@ -15,7 +15,10 @@
     "deploy:functions": "npm --prefix functions run build && firebase deploy --only functions",
     "deploy:rules": "firebase deploy --only firestore:rules,storage,firestore:indexes",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:unit": "vitest run",
+    "test:rules": "firebase emulators:exec --only firestore,storage --project ts-press-rules-ci \"vitest run --config vitest.rules.config.ts\"",
+    "test:watch": "vitest",
+    "verify": "npm run lint && npm run build && npm --prefix functions run build && npm run test:unit && npm run test:rules"
   },
   "dependencies": {
     "docx": "^9.7.1",

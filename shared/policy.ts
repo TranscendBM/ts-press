@@ -49,14 +49,15 @@ export const ATTACHMENT_LIMITS = {
 }
 
 /**
- * 驗證附件路徑只落在該篇新聞稿的 attachments 目錄底下。
+ * 驗證檔案路徑只落在該篇新聞稿指定子目錄底下（attachments 或 hero）。
  *
  * Firestore 的 path 欄位是前端寫入的。若不檢查，被竄改的文件就能讓
- * Functions（Admin SDK 不受 Storage 規則限制）讀走 bucket 內任何檔案。
+ * Functions（Admin SDK 不受 Storage 規則限制）讀走或刪除 bucket 內任何檔案。
  */
-export function isAllowedAttachmentPath(
+export function isAllowedPressFilePath(
   path: string | undefined,
   pressReleaseId: string,
+  folder: 'attachments' | 'hero',
 ): boolean {
   if (!path || typeof path !== 'string' || !pressReleaseId) return false
   if (pressReleaseId.includes('/') || pressReleaseId.includes('..')) return false
@@ -65,17 +66,37 @@ export function isAllowedAttachmentPath(
     return false
   }
   if (path.includes('\0') || path.includes('\\')) return false
-  const prefix = `press/${pressReleaseId}/attachments/`
+  const prefix = `press/${pressReleaseId}/${folder}/`
   if (!path.startsWith(prefix)) return false
   // 前綴之後必須有檔名，且不得再有目錄階層
   const rest = path.slice(prefix.length)
   return rest.length > 0 && !rest.includes('/')
 }
 
+/** 附件路徑驗證，向下相容既有呼叫端。 */
+export function isAllowedAttachmentPath(
+  path: string | undefined,
+  pressReleaseId: string,
+): boolean {
+  return isAllowedPressFilePath(path, pressReleaseId, 'attachments')
+}
+
 /**
  * Firestore 的 batch 一次最多 500 筆。留餘裕避免其他寫入把額度用滿。
  */
 export const BATCH_SIZE = 450
+
+/**
+ * sendCampaign 單次呼叫最多實際寄出的封數。
+ *
+ * 每封信之間刻意間隔 400ms（避免被 mail2000 判定濫發），
+ * 540 秒的 Function timeout 扣掉間隔與 SMTP 往返時間後，
+ * 抓一個有安全餘裕的數字，避免逼近 timeout 而被中止在寄送到一半。
+ * 超過上限的收件人會留在原本的狀態（queued／failed），
+ * campaign 狀態標成 partial，由呼叫端另外呼叫 retryCampaign 接著寄完，
+ * 而不是無限拉高 timeout 硬撐。
+ */
+export const SEND_BATCH_LIMIT = 300
 
 export function chunk<T>(items: T[], size = BATCH_SIZE): T[][] {
   if (!Number.isInteger(size) || size <= 0) {

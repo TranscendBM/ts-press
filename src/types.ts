@@ -150,7 +150,11 @@ export interface EventParticipant {
   updatedAt?: Timestamp
 }
 
-export type RecipientStatus = 'queued' | 'sent' | 'failed'
+/**
+ * sending：已被某次呼叫原子性地搶下、正在寄送中（正常情況下很短暫；
+ * 若卡在這個狀態代表該次呼叫中途中斷，之後呼叫 retryCampaign 可以安全重試）。
+ */
+export type RecipientStatus = 'queued' | 'sending' | 'sent' | 'failed'
 
 export interface CampaignRecipient {
   contactId: string
@@ -168,10 +172,21 @@ export interface Campaign {
   pressTitle: string
   category: Category
   targetLists: ListId[]
+  mode?: 'self' | 'testList' | 'real'
   isTest: boolean
   sentBy: string
   sentAt?: Timestamp
-  status: 'sending' | 'completed' | 'failed'
+  /** 這次呼叫開始處理的時間。 */
+  startedAt?: Timestamp
+  /** 到達 completed／failed 這類終止狀態的時間；partial／sending 時不會有值。 */
+  completedAt?: Timestamp
+  updatedAt?: Timestamp
+  /**
+   * partial：這次呼叫因為單批上限（SEND_BATCH_LIMIT）而提早停止，
+   * 還有收件人尚未確認寄出，可以呼叫 retryCampaign 接著寄完。
+   */
+  status: 'sending' | 'partial' | 'completed' | 'failed'
+  lastError?: string
   totals: {
     recipients: number
     sent: number
