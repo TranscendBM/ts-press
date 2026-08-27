@@ -201,6 +201,40 @@ export function renderBlocks(text: string, font: string): string[] {
     )
 }
 
+/** 把一段純文字轉成乾淨的行內 HTML：跳脫文字、網址包成不含樣式的 <a>。 */
+function bodyInlineHtml(text: string): string {
+  return splitLinks(text)
+    .map((seg) => {
+      const safe = escapeHtml(seg.text)
+      if (!seg.url) return safe
+      const href = safeUrl(seg.url)
+      return href ? `<a href="${href}">${safe}</a>` : safe
+    })
+    .join('')
+    .replace(/\n/g, '<br>')
+}
+
+/**
+ * 把新聞稿內文轉成「乾淨、無行內樣式」的語意 HTML，供貼進外部 CMS 後台。
+ *
+ * 段落 → <p>；以「## 」開頭的行 → <h4>；網址 → <a>。
+ * 刻意不加任何 style（跟寄信用的 renderBlocks 不同）—— CMS 有自己的樣式，
+ * 帶樣式進去反而會打架。
+ */
+export function renderBodyHtml(bodyText: string): string {
+  return bodyText
+    .replace(/\r\n/g, '\n')
+    .split(/\n{2,}/)
+    .map((b) => b.trim())
+    .filter(Boolean)
+    .map((block) =>
+      block.startsWith('## ')
+        ? `<h4>${escapeHtml(block.slice(3).trim())}</h4>`
+        : `<p>${bodyInlineHtml(block)}</p>`,
+    )
+    .join('\n')
+}
+
 export function renderEmailHtml(input: TemplateInput): string {
   const copy = COPY[input.language]
   const font = input.language === 'tw' ? FONT_TW : FONT_EN

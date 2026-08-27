@@ -4,6 +4,7 @@ import {
   escapeHtml,
   subjectSingleLine,
   subjectMultiline,
+  renderBodyHtml,
   renderEmailHtml,
   renderEmailText,
   safeUrl,
@@ -70,6 +71,32 @@ describe('splitLinks', () => {
   it('沒有網址時原樣回傳', () => {
     expect(splitLinks('純文字')).toEqual([{ text: '純文字' }])
     expect(splitLinks('')).toEqual([])
+  })
+})
+
+describe('renderBodyHtml', () => {
+  it('段落 <p>、小標 <h4>、連結 <a>，且不含行內樣式', () => {
+    const html = renderBodyHtml(
+      '## 展覽資訊\n\n第一段，詳見 https://tw.transcend-info.com/x 。\n\n第二段。',
+    )
+    expect(html).toContain('<h4>展覽資訊</h4>')
+    expect(html).toContain('<p>')
+    expect(html).toContain(
+      '<a href="https://tw.transcend-info.com/x">https://tw.transcend-info.com/x</a>',
+    )
+    expect(html).not.toContain('style=')
+  })
+
+  it('段落內單行斷行轉成 <br>', () => {
+    expect(renderBodyHtml('第一行\n第二行')).toBe('<p>第一行<br>第二行</p>')
+  })
+
+  it('會跳脫 HTML 特殊字元', () => {
+    expect(renderBodyHtml('a < b & c')).toBe('<p>a &lt; b &amp; c</p>')
+  })
+
+  it('空內文回傳空字串', () => {
+    expect(renderBodyHtml('')).toBe('')
   })
 })
 

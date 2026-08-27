@@ -10,6 +10,9 @@ import {
 } from 'firebase/firestore'
 import {
   ArrowLeft,
+  Check,
+  Code2,
+  Copy,
   Eye,
   FileDown,
   FileType,
@@ -38,7 +41,7 @@ import {
   describeStorageError,
   uploadPressFile,
 } from '../lib/storage'
-import { renderEmailHtml } from '../../shared/emailTemplate'
+import { renderBodyHtml, renderEmailHtml } from '../../shared/emailTemplate'
 import { downloadPdf, downloadWord } from '../lib/exportDoc'
 import { saveThenNavigate } from '../lib/saveThenNavigate'
 
@@ -55,6 +58,8 @@ export default function PressEditPage() {
   // 存最新的 save，讓自動儲存的計時器永遠呼叫到當前 render 的版本
   const saveRef = useRef<() => Promise<boolean>>(() => Promise.resolve(false))
   const [previewOpen, setPreviewOpen] = useState(false)
+  const [htmlOpen, setHtmlOpen] = useState(false)
+  const [copied, setCopied] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [downloading, setDownloading] = useState(false)
   const [error, setError] = useState('')
@@ -262,6 +267,18 @@ export default function PressEditPage() {
   }
   const downloadName = `${press.title || '新聞稿'}_${lang}`
 
+  // 內文轉乾淨語意 HTML（<p>/<h4>/<a>），供貼進公司 CMS 後台
+  const bodyHtml = renderBodyHtml(version.bodyText || '')
+  async function copyBodyHtml() {
+    try {
+      await navigator.clipboard.writeText(bodyHtml)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      setCopied(false)
+    }
+  }
+
   return (
     <>
       <PageHeader
@@ -302,6 +319,15 @@ export default function PressEditPage() {
             <Button onClick={() => downloadPdf(templateInput, downloadName)}>
               <FileDown className="size-4" />
               PDF
+            </Button>
+            <Button
+              onClick={() => {
+                setCopied(false)
+                setHtmlOpen(true)
+              }}
+            >
+              <Code2 className="size-4" />
+              HTML
             </Button>
             <Button variant="primary" onClick={save} disabled={saving || !dirty}>
               <Save className="size-4" />
@@ -559,6 +585,43 @@ export default function PressEditPage() {
           title="email-preview"
           className="h-[60vh] w-full rounded-lg border border-slate-200"
           srcDoc={renderEmailHtml(templateInput)}
+        />
+      </Modal>
+
+      <Modal
+        open={htmlOpen}
+        wide
+        title={`內文 HTML — ${LANGUAGE_LABELS[lang]}`}
+        onClose={() => setHtmlOpen(false)}
+        footer={
+          <>
+            <Button onClick={() => setHtmlOpen(false)}>關閉</Button>
+            <Button variant="primary" onClick={copyBodyHtml}>
+              {copied ? (
+                <>
+                  <Check className="size-4" />
+                  已複製
+                </>
+              ) : (
+                <>
+                  <Copy className="size-4" />
+                  複製 HTML
+                </>
+              )}
+            </Button>
+          </>
+        }
+      >
+        <p className="mb-3 text-xs text-slate-500">
+          目前語言版本的內文，已轉成乾淨的 HTML（段落 <code>&lt;p&gt;</code>、小標題{' '}
+          <code>&lt;h4&gt;</code>、連結 <code>&lt;a&gt;</code>），可直接貼進公司後台。
+          不含標題、圖片與附件。
+        </p>
+        <textarea
+          readOnly
+          value={bodyHtml}
+          onFocus={(e) => e.currentTarget.select()}
+          className="h-[52vh] w-full resize-none rounded-lg border border-slate-200 bg-slate-50 p-3 font-mono text-xs leading-relaxed text-slate-800"
         />
       </Modal>
     </>
