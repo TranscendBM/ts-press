@@ -32,7 +32,13 @@ import { blankVersions, formatDate, todayIso } from '../lib/helpers'
  */
 const deletePressReleaseFn = httpsCallable<
   { pressReleaseId: string },
-  { ok: boolean; filesRemoved: string[]; cleanupQueued: string[] }
+  {
+    ok: boolean
+    documentDeleted: boolean
+    filesRemoved: string[]
+    cleanupQueued: string[]
+    cleanupQueueWriteFailed: string[]
+  }
 >(functions, 'deletePressRelease')
 
 export default function PressListPage() {

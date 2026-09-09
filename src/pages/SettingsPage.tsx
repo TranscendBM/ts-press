@@ -16,6 +16,7 @@ import SmtpSettingsCard from '../components/SmtpSettingsCard'
 import RolePermissionsCard from '../components/RolePermissionsCard'
 import PressContactsCard from '../components/PressContactsCard'
 import InternalCopyCard from '../components/InternalCopyCard'
+import StorageCleanupCard from '../components/StorageCleanupCard'
 import { ROLES, ROLE_LABELS, normalizeRole, type Role } from '../constants'
 import { hasPermission, validateUserDoc } from '../../shared/permissions'
 import type { AppUser } from '../types'
@@ -137,6 +138,7 @@ export default function SettingsPage() {
         <RolePermissionsCard />
         <PressContactsCard />
         <InternalCopyCard />
+        <StorageCleanupCard />
         <SmtpSettingsCard />
 
         {issues.length > 0 && (

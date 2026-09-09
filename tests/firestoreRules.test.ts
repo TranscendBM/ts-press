@@ -581,9 +581,113 @@ describe('firestore.rules — 動態權限矩陣（mediaContacts / mediaEvents /
       }
     })
 
-    it('未登入或不在白名單一律拒絕', async () => {
+    // round 8（Finding 2 item 11）：delivery_unknown 的人工 resolution
+    // 一定要透過 resolveDeliveryUnknown callable（Admin SDK，會繞過這份
+    // 規則），不能讓任何角色（含 admin）直接改 recipients 子集合的狀態
+    // 繞過 requireAdmin／稽核欄位／totals 重算——這裡直接驗證即使是
+    // admin，用戶端 SDK 也一律被 `allow write: if false` 擋下，包含
+    // recipients 子集合本身（不只 campaign 文件），以及完全未登入的呼叫。
+    it('delivery_unknown resolution 不能繞過 callable：連 admin 用戶端 SDK 也不能直接改 recipients 子集合的狀態', async () => {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), 'campaigns', 'c2'), { status: 'needs_review' })
+        await setDoc(
+          doc(ctx.firestore(), 'campaigns', 'c2', 'recipients', 'r1'),
+          { status: 'delivery_unknown' },
+        )
+      })
+      for (const email of ['admin@x.com', 'manager@x.com', 'spec@x.com']) {
+        await assertFails(
+          setDoc(
+            doc(as(email), 'campaigns', 'c2', 'recipients', 'r1'),
+            { status: 'sent', resolvedBy: email },
+            { merge: true },
+          ),
+        )
+      }
+      await assertFails(
+        setDoc(
+          doc(env.unauthenticatedContext().firestore(), 'campaigns', 'c2', 'recipients', 'r1'),
+          { status: 'sent' },
+          { merge: true },
+        ),
+      )
+    })
+
+    // round 10 新增（Finding 3）：resolutionEvents/{resolutionId} 是
+    // delivery_unknown 人工 resolution 的 immutable 稽核紀錄，唯一能防止
+    // 同一個 resolutionId 被重複套用的真相來源（見 shared/campaignSend.ts
+    // 的 ResolutionEventRecord 說明）。這份文件的價值正是「任何人都不能
+    // 改它」——一旦允許 client 端寫入（哪怕只是 admin、哪怕只是
+    // update），就等於讓人可以直接偽造或竄改稽核紀錄，繞過整個 fencing
+    // 機制。這裡驗證 create／update／delete 三種操作，對所有角色（含
+    // admin）與未登入使用者都一律拒絕；read 則跟 campaigns 本身一樣，
+    // 依 viewCampaigns 權限開放。
+    it('resolutionEvents：任何角色（含 admin）都不能 create／update／delete，viewCampaigns 可以讀', async () => {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), 'campaigns', 'c3'), { status: 'needs_review' })
+        await setDoc(
+          doc(ctx.firestore(), 'campaigns', 'c3', 'resolutionEvents', 'existing-event'),
+          {
+            recipientId: 'r1',
+            resolutionAction: 'mark_delivered',
+            resolutionReason: '已電話確認',
+            resolvedBy: 'admin@x.com',
+            fencingGeneration: 1,
+            beforeStatus: 'delivery_unknown',
+            afterStatus: 'sent',
+          },
+        )
+      })
+
+      for (const email of ['admin@x.com', 'manager@x.com', 'spec@x.com']) {
+        // create：偽造一筆全新的稽核紀錄
+        await assertFails(
+          setDoc(doc(as(email), 'campaigns', 'c3', 'resolutionEvents', 'forged-event'), {
+            recipientId: 'r1',
+            resolutionAction: 'mark_delivered',
+            resolutionReason: '偽造的紀錄',
+            resolvedBy: email,
+          }),
+        )
+        // update：竄改既有的稽核紀錄
+        await assertFails(
+          setDoc(
+            doc(as(email), 'campaigns', 'c3', 'resolutionEvents', 'existing-event'),
+            { resolutionReason: '竄改過的原因' },
+            { merge: true },
+          ),
+        )
+        // delete：刪掉稽核紀錄，讓同一個 resolutionId 可以被重新套用
+        await assertFails(
+          deleteDoc(doc(as(email), 'campaigns', 'c3', 'resolutionEvents', 'existing-event')),
+        )
+        // read：跟 campaigns 本身一樣，依 viewCampaigns 權限開放（三個
+        // 預設角色都有 viewCampaigns，見 DEFAULT_PERMISSIONS）。
+        await assertSucceeds(
+          getDoc(doc(as(email), 'campaigns', 'c3', 'resolutionEvents', 'existing-event')),
+        )
+      }
+
+      await assertFails(
+        setDoc(
+          doc(env.unauthenticatedContext().firestore(), 'campaigns', 'c3', 'resolutionEvents', 'forged-event-2'),
+          { recipientId: 'r1' },
+        ),
+      )
+      await assertFails(
+        getDoc(doc(env.unauthenticatedContext().firestore(), 'campaigns', 'c3', 'resolutionEvents', 'existing-event')),
+      )
+    })
+
+    it('未登入或不在白名單一律拒絕，包含對 campaigns／recipients 的寫入', async () => {
       await assertFails(getDoc(doc(env.unauthenticatedContext().firestore(), 'pressReleases', 'p1')))
       await assertFails(getDoc(doc(as('ghost@x.com'), 'pressReleases', 'p1')))
+      await assertFails(
+        setDoc(doc(env.unauthenticatedContext().firestore(), 'campaigns', 'c1'), { status: 'x' }),
+      )
+      await assertFails(
+        setDoc(doc(as('ghost@x.com'), 'campaigns', 'c1'), { status: 'x' }),
+      )
     })
   })
 

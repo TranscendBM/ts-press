@@ -8,7 +8,9 @@
     "serve": "npm run build && firebase emulators:start --only functions",
     "deploy": "firebase deploy --only functions",
     "logs": "firebase functions:log",
-    "prebuild": "node scripts/sync-shared.mjs"
+    "prebuild": "node scripts/sync-shared.mjs",
+    "audit:drain": "npm run build && node scripts/audit-campaign-drain.mjs",
+    "ops:campaign-repair": "npm run build && node scripts/ops-campaign-repair.mjs"
   },
   "engines": {
     "node": "22"
@@ -23,5 +25,8 @@
   "devDependencies": {
     "@types/nodemailer": "^8.0.1",
     "typescript": "^5.7.0"
+  },
+  "overrides": {
+    "qs": "6.16.0"
   }
 }

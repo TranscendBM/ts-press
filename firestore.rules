@@ -223,6 +223,16 @@ service cloud.firestore {
         allow read: if hasPerm('viewCampaigns');
         allow write: if false;
       }
+
+      // delivery_unknown 人工 resolution 的 immutable 稽核紀錄——只由
+      // resolveDeliveryUnknown（Admin SDK）在 transaction 內用 create 寫入
+      // 一次，之後永遠不再修改。client 端一律不能寫（含 admin）：這份紀錄
+      // 存在的意義正是防止同一個 resolutionId 被重複套用，一旦允許 client
+      // 端寫入（哪怕只是 update），就等於讓人可以繞過這個 fencing 機制本身。
+      match /resolutionEvents/{resolutionId} {
+        allow read: if hasPerm('viewCampaigns');
+        allow write: if false;
+      }
     }
   }
 }

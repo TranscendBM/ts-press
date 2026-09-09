@@ -10,6 +10,11 @@ export default defineConfig({
     environment: 'node',
     // functions 與前端共用同一份設定，兩邊的純邏輯都在這裡驗證
     include: ['tests/**/*.test.ts'],
-    exclude: ['tests/firestoreRules.test.ts', 'tests/storageRules.test.ts'],
+    exclude: [
+      'tests/firestoreRules.test.ts',
+      'tests/storageRules.test.ts',
+      'tests/campaignConcurrency.test.ts',
+      'tests/cleanupQueueConcurrency.test.ts',
+    ],
   },
 })

@@ -13,6 +13,7 @@ const STATUS_LABELS: Record<Campaign['status'], string> = {
   partial: '尚未寄完',
   completed: '已完成',
   failed: '失敗',
+  needs_review: '需人工檢查',
 }
 
 const STATUS_TONES: Record<Campaign['status'], 'amber' | 'green' | 'red'> = {
@@ -20,6 +21,9 @@ const STATUS_TONES: Record<Campaign['status'], 'amber' | 'green' | 'red'> = {
   partial: 'amber',
   completed: 'green',
   failed: 'red',
+  // 跟 CampaignDetailPage 一致：needs_review 不是「確定失敗」，用 amber
+  // 呼應「需要人工檢查」，不要用 red 讓人誤以為是失敗。
+  needs_review: 'amber',
 }
 
 export default function CampaignsPage() {
@@ -84,7 +88,9 @@ export default function CampaignsPage() {
               <tbody className="divide-y divide-slate-100">
                 {visible.map((c) => {
                   const total = c.totals?.recipients || 0
-                  const failed = c.totals?.failed ?? 0
+                  // 待重試與永久失敗都算「還沒成功」，列表頁一眼看總數就好，
+                  // 想細分兩者的比例要進發送紀錄詳情頁看。
+                  const failed = (c.totals?.failed ?? 0) + (c.totals?.exhausted ?? 0)
                   return (
                     <tr
                       key={c.id}

@@ -86,18 +86,6 @@ export function isAllowedAttachmentPath(
  */
 export const BATCH_SIZE = 450
 
-/**
- * sendCampaign 單次呼叫最多實際寄出的封數。
- *
- * 每封信之間刻意間隔 400ms（避免被 mail2000 判定濫發），
- * 540 秒的 Function timeout 扣掉間隔與 SMTP 往返時間後，
- * 抓一個有安全餘裕的數字，避免逼近 timeout 而被中止在寄送到一半。
- * 超過上限的收件人會留在原本的狀態（queued／failed），
- * campaign 狀態標成 partial，由呼叫端另外呼叫 retryCampaign 接著寄完，
- * 而不是無限拉高 timeout 硬撐。
- */
-export const SEND_BATCH_LIMIT = 300
-
 export function chunk<T>(items: T[], size = BATCH_SIZE): T[][] {
   if (!Number.isInteger(size) || size <= 0) {
     throw new Error('chunk size must be a positive integer')
