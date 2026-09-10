@@ -1,0 +1,32 @@
+name: verify
+
+# 每次 push／PR 都跑一次完整的 npm run verify：lint、前端 build、functions
+# build、純單元測試、以及需要 Firebase 模擬器的 Rules 測試。
+# 刻意用真的模擬器跑 Rules 測試而不是 skip —— 詳見
+# tests/firestoreRules.test.ts 與 tests/storageRules.test.ts 的說明。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      # firebase emulators:exec 需要 Java 執行 Firestore／Storage 模擬器
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - run: npm ci
+      - run: npm --prefix functions ci
+
+      - run: npm run verify

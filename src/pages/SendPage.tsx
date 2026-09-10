@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { collection, doc, getDoc, getDocs, orderBy, query } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
@@ -23,10 +23,20 @@ import { blankVersions, formatBytes } from '../lib/helpers'
 
 type SendMode = 'self' | 'testList' | 'real'
 
+// 逾時保留餘裕：與後端 timeoutSeconds 一致，大量收件人時不會被用戶端提早判斷逾時
+// （即使用戶端提早斷線，伺服器仍會繼續處理，只是這次呼叫收不到回應）
+const CALLABLE_TIMEOUT_MS = 540_000
+
 const sendCampaign = httpsCallable<
-  { pressReleaseId: string; targetLists?: ListId[]; mode: SendMode },
-  { campaignId: string; recipients: number }
->(functions, 'sendCampaign')
+  {
+    pressReleaseId: string
+    targetLists?: ListId[]
+    mode: SendMode
+    /** 正式發送才帶：同一次「確認發送」互動固定不變，讓重試不會重複寄送。 */
+    idempotencyKey?: string
+  },
+  { campaignId: string; recipients: number; status?: string }
+>(functions, 'sendCampaign', { timeout: CALLABLE_TIMEOUT_MS })
 
 export default function SendPage() {
   const [params] = useSearchParams()
@@ -44,6 +54,9 @@ export default function SendPage() {
   const [selected, setSelected] = useState<ListId[]>([])
   const [loading, setLoading] = useState(true)
   const [confirmOpen, setConfirmOpen] = useState(false)
+  // 確認視窗開啟時固定一個識別碼，重試（例如網路失敗後再按一次「確認發送」）
+  // 沿用同一個，讓後端可以判斷是不是同一次發送意圖、不會重複建立或重複寄送。
+  const idempotencyKeyRef = useRef<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<{
     tone: 'ok' | 'error'
@@ -164,6 +177,7 @@ export default function SendPage() {
         pressReleaseId: press.id,
         targetLists: mode === 'real' ? selected : undefined,
         mode,
+        idempotencyKey: mode === 'real' ? (idempotencyKeyRef.current ?? undefined) : undefined,
       })
       setConfirmOpen(false)
       if (mode === 'self') {
@@ -177,6 +191,9 @@ export default function SendPage() {
           text: `已寄給測試名單共 ${res.data.recipients} 位，可到發送紀錄查看結果。`,
         })
       } else {
+        // 成功了才清掉識別碼 —— 下次按「正式發送」該是全新的一次意圖，
+        // 不該沿用剛剛已經跑完的那個 key。
+        idempotencyKeyRef.current = null
         navigate(`/campaigns/${res.data.campaignId}`)
       }
     } catch (err) {
@@ -417,7 +434,12 @@ export default function SendPage() {
           <div className="mt-5 border-t border-slate-200 pt-5">
             <Button
               variant="primary"
-              onClick={() => setConfirmOpen(true)}
+              onClick={() => {
+                // 每次重新打開確認視窗都是一次全新的發送意圖，產生新的識別碼；
+                // 視窗開著期間若重試（例如按了確認發送但失敗），沿用同一個。
+                idempotencyKeyRef.current = crypto.randomUUID()
+                setConfirmOpen(true)
+              }}
               disabled={busy || !readyToSend || !canSend}
             >
               <Send className="size-4" />

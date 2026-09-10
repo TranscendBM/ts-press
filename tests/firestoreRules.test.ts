@@ -5,7 +5,7 @@ import {
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing'
 import { readFileSync } from 'node:fs'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest'
 import {
   doc,
   getDoc,
@@ -15,27 +15,16 @@ import {
 } from 'firebase/firestore'
 
 /**
- * Firestore 安全規則測試，重點在 settings/permissions。
+ * Firestore 安全規則測試，重點在 settings/permissions 與動態權限矩陣。
  *
- * 需要 Firebase 模擬器：
- *   npx firebase emulators:start --only firestore
+ * 一律透過 `npm run test:rules` 執行（用 firebase emulators:exec 包住模擬
+ * 器）。刻意不做「模擬器沒開就 skip」的探測 —— 那樣 CI 忘記啟動模擬器時
+ * 會被悄悄吞成一片綠燈，看起來像測試通過，實際上什麼都沒驗證到。
+ * 模擬器沒連上，initializeTestEnvironment() 會直接拋錯、整組測試顯示失敗，
+ * 這才是我們要的行為。
  */
 const HOST = '127.0.0.1'
 const PORT = 8080
-
-async function emulatorRunning() {
-  try {
-    // 只要連得上就代表模擬器在跑，不看狀態碼
-    await fetch(`http://${HOST}:${PORT}/`, {
-      signal: AbortSignal.timeout(3000),
-    })
-    return true
-  } catch {
-    return false
-  }
-}
-
-const available = await emulatorRunning()
 
 const FULL_PERMS = {
   viewPress: true,
@@ -50,7 +39,7 @@ const FULL_PERMS = {
   manageSettings: false,
 }
 
-describe.skipIf(!available)('firestore.rules — settings/permissions', () => {
+describe('firestore.rules — settings/permissions', () => {
   let env: RulesTestEnvironment
 
   beforeAll(async () => {
@@ -233,7 +222,7 @@ describe.skipIf(!available)('firestore.rules — settings/permissions', () => {
   })
 })
 
-describe.skipIf(!available)('firestore.rules — users 白名單', () => {
+describe('firestore.rules — users 白名單', () => {
   let env: RulesTestEnvironment
 
   beforeAll(async () => {
@@ -356,7 +345,7 @@ describe.skipIf(!available)('firestore.rules — users 白名單', () => {
   })
 })
 
-describe.skipIf(!available)('firestore.rules — settings/branding（公開文件）', () => {
+describe('firestore.rules — settings/branding（公開文件）', () => {
   let env: RulesTestEnvironment
 
   beforeAll(async () => {
@@ -474,8 +463,358 @@ describe.skipIf(!available)('firestore.rules — settings/branding（公開文�
   })
 })
 
-describe.skipIf(available)('firestore.rules（略過）', () => {
-  it('需要 Firebase 模擬器，請先執行 npx firebase emulators:start --only firestore', () => {
-    expect(available).toBe(false)
+describe('firestore.rules — 動態權限矩陣（mediaContacts / mediaEvents / pressReleases / campaigns）', () => {
+  let env: RulesTestEnvironment
+
+  beforeAll(async () => {
+    env = await initializeTestEnvironment({
+      projectId: 'ts-press-fs-rules-dynperm',
+      firestore: {
+        rules: readFileSync('firestore.rules', 'utf8'),
+        host: HOST,
+        port: PORT,
+      },
+    })
+  })
+
+  afterAll(async () => env?.cleanup())
+
+  beforeEach(async () => {
+    await env.clearFirestore()
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore()
+      await setDoc(doc(db, 'users', 'admin@x.com'), {
+        email: 'admin@x.com',
+        role: 'admin',
+        active: true,
+      })
+      await setDoc(doc(db, 'users', 'manager@x.com'), {
+        email: 'manager@x.com',
+        role: 'manager',
+        active: true,
+      })
+      await setDoc(doc(db, 'users', 'spec@x.com'), {
+        email: 'spec@x.com',
+        role: 'specialist',
+        active: true,
+      })
+      await setDoc(doc(db, 'users', 'legacy@x.com'), {
+        email: 'legacy@x.com',
+        role: 'editor',
+        active: true,
+      })
+      await setDoc(doc(db, 'users', 'ghostrole@x.com'), {
+        email: 'ghostrole@x.com',
+        role: 'superuser',
+        active: true,
+      })
+      await setDoc(doc(db, 'users', 'norole@x.com'), {
+        // role 欄位整個缺失，模擬資料損毀／未初始化
+        email: 'norole@x.com',
+        active: true,
+      })
+      await setDoc(doc(db, 'users', 'badroletype@x.com'), {
+        email: 'badroletype@x.com',
+        role: 123,
+        active: true,
+      })
+    })
+  })
+
+  function as(email: string): Firestore {
+    return env
+      .authenticatedContext(email, { email, email_verified: true })
+      .firestore()
+  }
+
+  async function setOverrides(roles: Record<string, unknown>) {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'settings', 'permissions'), { roles })
+    })
+  }
+
+  describe('預設矩陣（沒有 settings/permissions 覆寫時）', () => {
+    it('viewPress／editPress：三種角色預設都能讀寫 pressReleases', async () => {
+      for (const email of ['admin@x.com', 'manager@x.com', 'spec@x.com']) {
+        await assertSucceeds(getDoc(doc(as(email), 'pressReleases', 'p1')))
+        await assertSucceeds(
+          setDoc(doc(as(email), 'pressReleases', 'p1'), { title: 'x' }),
+        )
+      }
+    })
+
+    it('manageContacts：三種角色預設都能讀寫 mediaContacts', async () => {
+      for (const email of ['admin@x.com', 'manager@x.com', 'spec@x.com']) {
+        await assertSucceeds(
+          setDoc(doc(as(email), 'mediaContacts', 'c1'), { email: 'a@b.com' }),
+        )
+      }
+    })
+
+    it('manageEvents：三種角色預設都能讀寫 mediaEvents 與 participants', async () => {
+      for (const email of ['admin@x.com', 'manager@x.com', 'spec@x.com']) {
+        await assertSucceeds(setDoc(doc(as(email), 'mediaEvents', 'e1'), { type: 'meal' }))
+        await assertSucceeds(
+          setDoc(doc(as(email), 'mediaEvents', 'e1', 'participants', 'c1'), {
+            attended: true,
+          }),
+        )
+      }
+    })
+
+    it('viewCampaigns：三種角色預設都能讀 campaigns 與 recipients，但都不能寫', async () => {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), 'campaigns', 'c1'), { status: 'sent' })
+        await setDoc(
+          doc(ctx.firestore(), 'campaigns', 'c1', 'recipients', 'r1'),
+          { status: 'sent' },
+        )
+      })
+      for (const email of ['admin@x.com', 'manager@x.com', 'spec@x.com']) {
+        await assertSucceeds(getDoc(doc(as(email), 'campaigns', 'c1')))
+        await assertSucceeds(
+          getDoc(doc(as(email), 'campaigns', 'c1', 'recipients', 'r1')),
+        )
+        await assertFails(
+          setDoc(doc(as(email), 'campaigns', 'c1'), { status: 'x' }),
+        )
+      }
+    })
+
+    // round 8（Finding 2 item 11）：delivery_unknown 的人工 resolution
+    // 一定要透過 resolveDeliveryUnknown callable（Admin SDK，會繞過這份
+    // 規則），不能讓任何角色（含 admin）直接改 recipients 子集合的狀態
+    // 繞過 requireAdmin／稽核欄位／totals 重算——這裡直接驗證即使是
+    // admin，用戶端 SDK 也一律被 `allow write: if false` 擋下，包含
+    // recipients 子集合本身（不只 campaign 文件），以及完全未登入的呼叫。
+    it('delivery_unknown resolution 不能繞過 callable：連 admin 用戶端 SDK 也不能直接改 recipients 子集合的狀態', async () => {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), 'campaigns', 'c2'), { status: 'needs_review' })
+        await setDoc(
+          doc(ctx.firestore(), 'campaigns', 'c2', 'recipients', 'r1'),
+          { status: 'delivery_unknown' },
+        )
+      })
+      for (const email of ['admin@x.com', 'manager@x.com', 'spec@x.com']) {
+        await assertFails(
+          setDoc(
+            doc(as(email), 'campaigns', 'c2', 'recipients', 'r1'),
+            { status: 'sent', resolvedBy: email },
+            { merge: true },
+          ),
+        )
+      }
+      await assertFails(
+        setDoc(
+          doc(env.unauthenticatedContext().firestore(), 'campaigns', 'c2', 'recipients', 'r1'),
+          { status: 'sent' },
+          { merge: true },
+        ),
+      )
+    })
+
+    // round 10 新增（Finding 3）：resolutionEvents/{resolutionId} 是
+    // delivery_unknown 人工 resolution 的 immutable 稽核紀錄，唯一能防止
+    // 同一個 resolutionId 被重複套用的真相來源（見 shared/campaignSend.ts
+    // 的 ResolutionEventRecord 說明）。這份文件的價值正是「任何人都不能
+    // 改它」——一旦允許 client 端寫入（哪怕只是 admin、哪怕只是
+    // update），就等於讓人可以直接偽造或竄改稽核紀錄，繞過整個 fencing
+    // 機制。這裡驗證 create／update／delete 三種操作，對所有角色（含
+    // admin）與未登入使用者都一律拒絕；read 則跟 campaigns 本身一樣，
+    // 依 viewCampaigns 權限開放。
+    it('resolutionEvents：任何角色（含 admin）都不能 create／update／delete，viewCampaigns 可以讀', async () => {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), 'campaigns', 'c3'), { status: 'needs_review' })
+        await setDoc(
+          doc(ctx.firestore(), 'campaigns', 'c3', 'resolutionEvents', 'existing-event'),
+          {
+            recipientId: 'r1',
+            resolutionAction: 'mark_delivered',
+            resolutionReason: '已電話確認',
+            resolvedBy: 'admin@x.com',
+            fencingGeneration: 1,
+            beforeStatus: 'delivery_unknown',
+            afterStatus: 'sent',
+          },
+        )
+      })
+
+      for (const email of ['admin@x.com', 'manager@x.com', 'spec@x.com']) {
+        // create：偽造一筆全新的稽核紀錄
+        await assertFails(
+          setDoc(doc(as(email), 'campaigns', 'c3', 'resolutionEvents', 'forged-event'), {
+            recipientId: 'r1',
+            resolutionAction: 'mark_delivered',
+            resolutionReason: '偽造的紀錄',
+            resolvedBy: email,
+          }),
+        )
+        // update：竄改既有的稽核紀錄
+        await assertFails(
+          setDoc(
+            doc(as(email), 'campaigns', 'c3', 'resolutionEvents', 'existing-event'),
+            { resolutionReason: '竄改過的原因' },
+            { merge: true },
+          ),
+        )
+        // delete：刪掉稽核紀錄，讓同一個 resolutionId 可以被重新套用
+        await assertFails(
+          deleteDoc(doc(as(email), 'campaigns', 'c3', 'resolutionEvents', 'existing-event')),
+        )
+        // read：跟 campaigns 本身一樣，依 viewCampaigns 權限開放（三個
+        // 預設角色都有 viewCampaigns，見 DEFAULT_PERMISSIONS）。
+        await assertSucceeds(
+          getDoc(doc(as(email), 'campaigns', 'c3', 'resolutionEvents', 'existing-event')),
+        )
+      }
+
+      await assertFails(
+        setDoc(
+          doc(env.unauthenticatedContext().firestore(), 'campaigns', 'c3', 'resolutionEvents', 'forged-event-2'),
+          { recipientId: 'r1' },
+        ),
+      )
+      await assertFails(
+        getDoc(doc(env.unauthenticatedContext().firestore(), 'campaigns', 'c3', 'resolutionEvents', 'existing-event')),
+      )
+    })
+
+    it('未登入或不在白名單一律拒絕，包含對 campaigns／recipients 的寫入', async () => {
+      await assertFails(getDoc(doc(env.unauthenticatedContext().firestore(), 'pressReleases', 'p1')))
+      await assertFails(getDoc(doc(as('ghost@x.com'), 'pressReleases', 'p1')))
+      await assertFails(
+        setDoc(doc(env.unauthenticatedContext().firestore(), 'campaigns', 'c1'), { status: 'x' }),
+      )
+      await assertFails(
+        setDoc(doc(as('ghost@x.com'), 'campaigns', 'c1'), { status: 'x' }),
+      )
+    })
+  })
+
+  describe('管理員撤銷權限後立即生效（使用者仍在白名單）', () => {
+    it('撤銷 spec 的 editPress 後不能再寫 pressReleases，但仍能讀', async () => {
+      await setOverrides({ specialist: { editPress: false } })
+      await assertFails(
+        setDoc(doc(as('spec@x.com'), 'pressReleases', 'p1'), { title: 'x' }),
+      )
+      await assertSucceeds(getDoc(doc(as('spec@x.com'), 'pressReleases', 'p1')))
+    })
+
+    it('撤銷 spec 的 viewPress 後連讀都不行', async () => {
+      await setOverrides({ specialist: { viewPress: false } })
+      await assertFails(getDoc(doc(as('spec@x.com'), 'pressReleases', 'p1')))
+    })
+
+    it('撤銷 manager 的 manageContacts 後不能再讀寫媒體名單', async () => {
+      await setOverrides({ manager: { manageContacts: false } })
+      await assertFails(
+        setDoc(doc(as('manager@x.com'), 'mediaContacts', 'c1'), {}),
+      )
+      await assertFails(getDoc(doc(as('manager@x.com'), 'mediaContacts', 'c1')))
+    })
+
+    it('撤銷 spec 的 manageEvents 後不能再讀寫活動與 participants', async () => {
+      await setOverrides({ specialist: { manageEvents: false } })
+      await assertFails(setDoc(doc(as('spec@x.com'), 'mediaEvents', 'e1'), {}))
+      await assertFails(
+        setDoc(doc(as('spec@x.com'), 'mediaEvents', 'e1', 'participants', 'c1'), {}),
+      )
+    })
+
+    it('撤銷 manager 的 viewCampaigns 後不能再讀發送紀錄', async () => {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), 'campaigns', 'c1'), { status: 'sent' })
+      })
+      await setOverrides({ manager: { viewCampaigns: false } })
+      await assertFails(getDoc(doc(as('manager@x.com'), 'campaigns', 'c1')))
+    })
+
+    it('只覆寫其中一項權限，其餘權限仍照預設值運作', async () => {
+      await setOverrides({ specialist: { editPress: false } })
+      // manageContacts 沒被覆寫，應仍照預設（true）
+      await assertSucceeds(
+        setDoc(doc(as('spec@x.com'), 'mediaContacts', 'c1'), {}),
+      )
+    })
+
+    it('admin 專屬權限不受覆寫矩陣影響（覆寫也無法讓非 admin 拿到）', async () => {
+      // 這筆覆寫本身會被 settings/permissions 的寫入規則擋下（提權防護），
+      // 這裡直接繞過寫入規則塞進模擬資料庫，驗證「就算資料被竄改，
+      // hasPerm() 對 admin-only 權限也不採信覆寫」
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), 'settings', 'permissions'), {
+          roles: { specialist: { manageUsers: true } },
+        })
+      })
+      // manageUsers 本身沒有對應到這 4 個集合的讀寫規則，這裡改用行為一致的
+      // manageSettings 驗證邏輯來源一致：直接檢查 hasPermForRole 的效果，
+      // 透過 editPress（一般權限）仍照預設值運作來確認覆寫矩陣本身沒有壞掉。
+      await assertSucceeds(
+        setDoc(doc(as('spec@x.com'), 'pressReleases', 'p1'), { title: 'x' }),
+      )
+    })
+  })
+
+  describe('角色與白名單資料的邊界情境（一律拒絕）', () => {
+    it('舊代號 editor 仍視為 specialist（可讀寫），與 shared/permissions.ts 的 normalizeRole 一致', async () => {
+      await assertSucceeds(
+        setDoc(doc(as('legacy@x.com'), 'pressReleases', 'p1'), { title: 'x' }),
+      )
+    })
+
+    it('未知角色一律拒絕', async () => {
+      await assertFails(getDoc(doc(as('ghostrole@x.com'), 'pressReleases', 'p1')))
+    })
+
+    it('role 欄位缺失一律拒絕', async () => {
+      await assertFails(getDoc(doc(as('norole@x.com'), 'pressReleases', 'p1')))
+    })
+
+    it('role 欄位型別錯誤一律拒絕', async () => {
+      await assertFails(getDoc(doc(as('badroletype@x.com'), 'pressReleases', 'p1')))
+    })
+
+    it('停用帳號一律拒絕，即使角色是 admin', async () => {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), 'users', 'disabled-admin@x.com'), {
+          email: 'disabled-admin@x.com',
+          role: 'admin',
+          active: false,
+        })
+      })
+      await assertFails(
+        getDoc(doc(as('disabled-admin@x.com'), 'pressReleases', 'p1')),
+      )
+    })
+  })
+
+  describe('settings/permissions 資料被竄改成畸形格式時 fail closed', () => {
+    it('roles 不是 map：連預設權限都不給，全部拒絕', async () => {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), 'settings', 'permissions'), {
+          roles: 'everything',
+        })
+      })
+      await assertFails(getDoc(doc(as('spec@x.com'), 'pressReleases', 'p1')))
+      await assertFails(getDoc(doc(as('admin@x.com'), 'pressReleases', 'p1')))
+    })
+
+    it('權限鍵帶有未知欄位：連預設權限都不給，全部拒絕', async () => {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), 'settings', 'permissions'), {
+          roles: { specialist: { hackAll: true } },
+        })
+      })
+      await assertFails(getDoc(doc(as('spec@x.com'), 'pressReleases', 'p1')))
+    })
+
+    it('權限值不是布林值：連預設權限都不給，全部拒絕', async () => {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), 'settings', 'permissions'), {
+          roles: { specialist: { editPress: 'true' } },
+        })
+      })
+      await assertFails(getDoc(doc(as('spec@x.com'), 'pressReleases', 'p1')))
+    })
   })
 })

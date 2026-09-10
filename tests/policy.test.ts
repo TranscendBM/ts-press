@@ -6,6 +6,7 @@ import {
   evaluateAccess,
   expandInternalCopies,
   isAllowedAttachmentPath,
+  isAllowedPressFilePath,
   parseEmailList,
 } from '../shared/policy'
 
@@ -154,6 +155,40 @@ describe('isAllowedAttachmentPath', () => {
       ATTACHMENT_LIMITS.maxTotalBytes,
     )
     expect(ATTACHMENT_LIMITS.maxCount).toBeGreaterThan(0)
+  })
+})
+
+describe('isAllowedPressFilePath（hero 圖片，attachments 的邏輯已由上方涵蓋）', () => {
+  const id = 'abc123'
+
+  it('接受正確的 hero 路徑', () => {
+    expect(isAllowedPressFilePath(`press/${id}/hero/a.png`, id, 'hero')).toBe(
+      true,
+    )
+  })
+
+  it('拒絕其他新聞稿的 hero 路徑', () => {
+    expect(isAllowedPressFilePath(`press/other/hero/a.png`, id, 'hero')).toBe(
+      false,
+    )
+  })
+
+  it('拒絕資料夾對調（attachments 路徑不能當 hero 用，反之亦然）', () => {
+    expect(
+      isAllowedPressFilePath(`press/${id}/attachments/a.png`, id, 'hero'),
+    ).toBe(false)
+    expect(
+      isAllowedPressFilePath(`press/${id}/hero/a.png`, id, 'attachments'),
+    ).toBe(false)
+  })
+
+  it('拒絕路徑穿越與跨目錄層級', () => {
+    expect(
+      isAllowedPressFilePath(`press/${id}/hero/../../secret.txt`, id, 'hero'),
+    ).toBe(false)
+    expect(
+      isAllowedPressFilePath(`press/${id}/hero/sub/a.png`, id, 'hero'),
+    ).toBe(false)
   })
 })
 

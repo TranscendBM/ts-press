@@ -11,26 +11,24 @@ import {
 } from 'lucide-react'
 import { useAuth } from '../lib/AuthContext'
 import { useBranding } from '../lib/useBranding'
-import { ROLE_LABELS, normalizeRole, type Permission } from '../constants'
+import { ROLE_LABELS, normalizeRole } from '../constants'
+import { ROUTE_PERMISSIONS } from '../lib/routePermissions'
 
-const NAV = [
-  { to: '/press', label: '新聞稿', icon: FileText, need: 'viewPress' },
-  { to: '/schedule', label: '發送排程', icon: CalendarClock, need: 'viewPress' },
-  { to: '/contacts', label: '媒體名單', icon: Users, need: 'manageContacts' },
-  {
-    to: '/events',
-    label: '媒體關係',
-    icon: HeartHandshake,
-    need: 'manageEvents',
-  },
-  { to: '/send', label: '發送', icon: Send, need: 'sendTest' },
-  {
-    to: '/campaigns',
-    label: '發送紀錄',
-    icon: BarChart3,
-    need: 'viewCampaigns',
-  },
-] as const satisfies readonly { need: Permission; [k: string]: unknown }[]
+// 顯示用的標籤與圖示，權限與路徑則統一來自 ROUTE_PERMISSIONS ——
+// 與路由守門共用同一份權限對照，避免「選單藏起來、網址卻進得去」的落差。
+const NAV_META: Record<string, { label: string; icon: typeof FileText }> = {
+  '/press': { label: '新聞稿', icon: FileText },
+  '/schedule': { label: '發送排程', icon: CalendarClock },
+  '/contacts': { label: '媒體名單', icon: Users },
+  '/events': { label: '媒體關係', icon: HeartHandshake },
+  '/send': { label: '發送', icon: Send },
+  '/campaigns': { label: '發送紀錄', icon: BarChart3 },
+}
+
+const NAV = ROUTE_PERMISSIONS.filter((r) => NAV_META[r.to]).map((r) => ({
+  ...r,
+  ...NAV_META[r.to],
+}))
 
 export default function Layout() {
   const { appUser, logout, isAdmin, can } = useAuth()

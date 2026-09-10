@@ -3,17 +3,110 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
 
-    // Storage 規則讀不到 Firestore，只能看 token 裡的 custom claim。
-    // pressCenter 與 role 由 functions 的 syncUserClaims / onUserCreated
-    // 依 users 白名單寫入，與 firestore.rules 的 isWhitelisted() 對應。
-    function isPressCenterUser() {
-      return request.auth != null
-        && request.auth.token.email_verified == true
-        && request.auth.token.pressCenter == true;
+    // ---- 即時權限判斷 ----
+    //
+    // Storage Rules v2 支援 firestore.get() / firestore.exists()，可以直接讀
+    // (default) Firestore 資料庫的即時內容 —— 已用本機模擬器實測確認可行
+    // （seed 一個 Firestore 文件、改內容、觀察 Storage 的 allow/deny 立即
+    // 跟著變動；文件被刪掉時 .data 存取失敗，規則落在拒絕，行為與
+    // firestore.rules 的 fail-closed 一致）。
+    //
+    // 因此不再用 custom claims（pressCenter／role）判斷是否放行寫入 ——
+    // claims 寫進 JWT 後最長要等到 token 過期／下次登入才會刷新，管理員
+    // 撤銷 editPress 後，使用者理論上還能拿舊 token 繼續刪除、覆寫新聞稿
+    // 檔案到 token 過期為止。改成每次都讀 Firestore 的即時內容，撤銷立即
+    // 生效，不必處理任何 token 刷新的時序問題 —— 與 firestore.rules 的
+    // hasPerm() 是同一套邏輯，只是搬到 Storage Rules 的語法重寫一份
+    // （兩個規則引擎是獨立的檔案，沒有共用程式碼的機制，只能維持同步）。
+    //
+    // ⚠️ 修改這裡的權限矩陣邏輯時，firestore.rules 的對應函式也要一併更新，
+    // 兩邊必須與 shared/permissions.ts 的 DEFAULT_PERMISSIONS 保持一致。
+    // tests/storageRules.test.ts 與 tests/firestoreRules.test.ts 用平行的
+    // 測試案例交叉驗證兩邊行為一致。
+
+    function userDocPath() {
+      return /databases/(default)/documents/users/$(request.auth.token.email);
     }
 
-    function isAdmin() {
-      return isPressCenterUser() && request.auth.token.role == 'admin';
+    function isLiveWhitelisted() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && firestore.exists(userDocPath())
+        && firestore.get(userDocPath()).data.active == true;
+    }
+
+    // 舊代號沿用 shared/permissions.ts 的 normalizeRole：'editor' 視為 'specialist'。
+    function currentRole() {
+      let role = firestore.get(userDocPath()).data.role;
+      return role == 'editor' ? 'specialist' : role;
+    }
+
+    function isKnownRole(role) {
+      return role in ['admin', 'manager', 'specialist'];
+    }
+
+    // 對應 shared/permissions.ts 的 DEFAULT_PERMISSIONS
+    function defaultGrant(role, permission) {
+      return role == 'admin'
+        || (role == 'manager' && permission in ['viewPress', 'editPress', 'downloadPress', 'sendTest', 'sendReal', 'manageContacts', 'manageEvents', 'viewCampaigns'])
+        || (role == 'specialist' && permission in ['viewPress', 'editPress', 'downloadPress', 'manageContacts', 'manageEvents', 'viewCampaigns']);
+    }
+
+    function validPermissionMap(m) {
+      return m is map
+        && m.keys().hasOnly(['viewPress', 'editPress', 'downloadPress', 'sendTest', 'sendReal', 'manageContacts', 'manageEvents', 'viewCampaigns', 'manageUsers', 'manageSettings'])
+        && (!('viewPress' in m) || m['viewPress'] is bool)
+        && (!('editPress' in m) || m['editPress'] is bool)
+        && (!('downloadPress' in m) || m['downloadPress'] is bool)
+        && (!('sendTest' in m) || m['sendTest'] is bool)
+        && (!('sendReal' in m) || m['sendReal'] is bool)
+        && (!('manageContacts' in m) || m['manageContacts'] is bool)
+        && (!('manageEvents' in m) || m['manageEvents'] is bool)
+        && (!('viewCampaigns' in m) || m['viewCampaigns'] is bool)
+        && (!('manageUsers' in m) || m['manageUsers'] is bool)
+        && (!('manageSettings' in m) || m['manageSettings'] is bool);
+    }
+
+    function validRolesMap(roles) {
+      return roles is map
+        && roles.keys().hasOnly(['admin', 'manager', 'specialist'])
+        && (!('admin' in roles) || validPermissionMap(roles['admin']))
+        && (!('manager' in roles) || validPermissionMap(roles['manager']))
+        && (!('specialist' in roles) || validPermissionMap(roles['specialist']));
+    }
+
+    function permissionsDocPath() {
+      return /databases/(default)/documents/settings/permissions;
+    }
+
+    // settings/permissions 不存在時視為「尚未覆寫」，套用預設矩陣。
+    function permissionOverrides() {
+      return firestore.exists(permissionsDocPath())
+        ? firestore.get(permissionsDocPath()).data.roles
+        : null;
+    }
+
+    // 覆寫矩陣格式不合法時 fail closed（不猜測、不套預設），與 firestore.rules 一致。
+    function hasPermForRole(role, permission) {
+      let overrides = permissionOverrides();
+      let overridesOk = overrides == null || validRolesMap(overrides);
+      return isKnownRole(role)
+        && overridesOk
+        && (
+          permission in ['manageUsers', 'manageSettings']
+            ? role == 'admin'
+            : (overrides != null && role in overrides && permission in overrides[role])
+              ? overrides[role][permission] == true
+              : defaultGrant(role, permission)
+        );
+    }
+
+    function hasPerm(permission) {
+      return isLiveWhitelisted() && hasPermForRole(currentRole(), permission);
+    }
+
+    function isLiveAdmin() {
+      return isLiveWhitelisted() && currentRole() == 'admin';
     }
 
     function isImage() {
@@ -36,29 +129,30 @@ service firebase.storage {
     // 刻意把三種操作分開 —— delete 時沒有 request.resource，
     // 若在 delete 條件裡檢查 size 會因為存取 null 而永遠失敗。
     match /branding/{fileName} {
-      allow read: if isPressCenterUser();
-      allow create, update: if isAdmin()
+      allow read: if isLiveWhitelisted();
+      allow create, update: if isLiveAdmin()
         && isImage()
         && underSize(2 * 1024 * 1024);
-      allow delete: if isAdmin();
+      allow delete: if isLiveAdmin();
     }
 
-    // 新聞稿內文圖片：白名單使用者皆可維護
+    // 新聞稿內文圖片：讀取只要是白名單使用者，寫入（含刪除既有檔案）
+    // 需要即時的 editPress 權限 —— 管理員撤銷後立刻擋下，不看 token 是否更新過。
     match /press/{pressId}/hero/{fileName} {
-      allow read: if isPressCenterUser();
-      allow create, update: if isPressCenterUser()
+      allow read: if isLiveWhitelisted();
+      allow create, update: if hasPerm('editPress')
         && isImage()
         && underSize(10 * 1024 * 1024);
-      allow delete: if isPressCenterUser();
+      allow delete: if hasPerm('editPress');
     }
 
     // 郵件附件。sendCampaign 只會讀這個路徑底下的檔案。
     match /press/{pressId}/attachments/{fileName} {
-      allow read: if isPressCenterUser();
-      allow create, update: if isPressCenterUser()
+      allow read: if isLiveWhitelisted();
+      allow create, update: if hasPerm('editPress')
         && isAllowedAttachment()
         && underSize(10 * 1024 * 1024);
-      allow delete: if isPressCenterUser();
+      allow delete: if hasPerm('editPress');
     }
 
     // 其他路徑一律拒絕，避免將來新增目錄時默默沿用寬鬆規則

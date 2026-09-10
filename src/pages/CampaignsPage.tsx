@@ -8,6 +8,24 @@ import { CATEGORY_LABELS, LIST_LABELS } from '../constants'
 import type { Campaign } from '../types'
 import { formatDate } from '../lib/helpers'
 
+const STATUS_LABELS: Record<Campaign['status'], string> = {
+  sending: '發送中',
+  partial: '尚未寄完',
+  completed: '已完成',
+  failed: '失敗',
+  needs_review: '需人工檢查',
+}
+
+const STATUS_TONES: Record<Campaign['status'], 'amber' | 'green' | 'red'> = {
+  sending: 'amber',
+  partial: 'amber',
+  completed: 'green',
+  failed: 'red',
+  // 跟 CampaignDetailPage 一致：needs_review 不是「確定失敗」，用 amber
+  // 呼應「需要人工檢查」，不要用 red 讓人誤以為是失敗。
+  needs_review: 'amber',
+}
+
 export default function CampaignsPage() {
   const [items, setItems] = useState<Campaign[]>([])
   const [loading, setLoading] = useState(true)
@@ -70,7 +88,9 @@ export default function CampaignsPage() {
               <tbody className="divide-y divide-slate-100">
                 {visible.map((c) => {
                   const total = c.totals?.recipients || 0
-                  const failed = c.totals?.failed ?? 0
+                  // 待重試與永久失敗都算「還沒成功」，列表頁一眼看總數就好，
+                  // 想細分兩者的比例要進發送紀錄詳情頁看。
+                  const failed = (c.totals?.failed ?? 0) + (c.totals?.exhausted ?? 0)
                   return (
                     <tr
                       key={c.id}
@@ -104,20 +124,8 @@ export default function CampaignsPage() {
                         )}
                       </td>
                       <td className="px-4 py-3">
-                        <Badge
-                          tone={
-                            c.status === 'completed'
-                              ? 'green'
-                              : c.status === 'failed'
-                                ? 'red'
-                                : 'amber'
-                          }
-                        >
-                          {c.status === 'completed'
-                            ? '已完成'
-                            : c.status === 'failed'
-                              ? '失敗'
-                              : '發送中'}
+                        <Badge tone={STATUS_TONES[c.status]}>
+                          {STATUS_LABELS[c.status]}
                         </Badge>
                       </td>
                     </tr>

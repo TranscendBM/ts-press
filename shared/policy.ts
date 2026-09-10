@@ -49,14 +49,15 @@ export const ATTACHMENT_LIMITS = {
 }
 
 /**
- * 驗證附件路徑只落在該篇新聞稿的 attachments 目錄底下。
+ * 驗證檔案路徑只落在該篇新聞稿指定子目錄底下（attachments 或 hero）。
  *
  * Firestore 的 path 欄位是前端寫入的。若不檢查，被竄改的文件就能讓
- * Functions（Admin SDK 不受 Storage 規則限制）讀走 bucket 內任何檔案。
+ * Functions（Admin SDK 不受 Storage 規則限制）讀走或刪除 bucket 內任何檔案。
  */
-export function isAllowedAttachmentPath(
+export function isAllowedPressFilePath(
   path: string | undefined,
   pressReleaseId: string,
+  folder: 'attachments' | 'hero',
 ): boolean {
   if (!path || typeof path !== 'string' || !pressReleaseId) return false
   if (pressReleaseId.includes('/') || pressReleaseId.includes('..')) return false
@@ -65,11 +66,19 @@ export function isAllowedAttachmentPath(
     return false
   }
   if (path.includes('\0') || path.includes('\\')) return false
-  const prefix = `press/${pressReleaseId}/attachments/`
+  const prefix = `press/${pressReleaseId}/${folder}/`
   if (!path.startsWith(prefix)) return false
   // 前綴之後必須有檔名，且不得再有目錄階層
   const rest = path.slice(prefix.length)
   return rest.length > 0 && !rest.includes('/')
+}
+
+/** 附件路徑驗證，向下相容既有呼叫端。 */
+export function isAllowedAttachmentPath(
+  path: string | undefined,
+  pressReleaseId: string,
+): boolean {
+  return isAllowedPressFilePath(path, pressReleaseId, 'attachments')
 }
 
 /**
