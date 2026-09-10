@@ -2,9 +2,80 @@ import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { verifyBuildFreshness } from '../functions/scripts/audit-utils.mjs'
+import { verifyBuildFreshness, getDocumentByIdWithFieldMask } from '../functions/scripts/audit-utils.mjs'
 import { runDrainAuditScan, DEFAULT_MAX_SCAN_ATTEMPTS } from '../functions/scripts/audit-scan.mjs'
 import { classifyCampaignForDrainAudit, type CampaignDrainAuditInput } from '../shared/campaignSend'
+
+/**
+ * round 25 新增：getDocumentByIdWithFieldMask() 的純函式行為（不連線任何
+ * 真正的 Firestore／emulator，用 fake collectionRef 模擬 query 結果）——
+ * 這個 helper 是 round 25 修正「DocumentReference 沒有 .select()」這個 bug
+ * 的核心（見 audit-campaign-drain.mjs 的 readCampaignStabilityFields()、
+ * ops-campaign-repair.mjs 的 createClassificationLoader()，兩者現在都呼叫
+ * 這裡同一份函式）。
+ *
+ * ⚠️「查到超過 1 筆時 fail closed」這個分支，在真正的 Firestore 裡幾乎不可能
+ * 自然發生（同一個 collection 裡文件 ID 本身就是唯一的，用
+ * FieldPath.documentId() 精確比對正常只會查到 0 或 1 筆）——所以這裡用
+ * fake collectionRef 直接模擬「查詢層回傳了超過 1 筆」這個不應該發生的
+ * 狀況，驗證 helper 本身確實會 fail closed（throw），而不是靜默取
+ * docs[0]。這是測 helper 這一層的防呆邏輯本身，不是在測 Firestore。
+ */
+describe('getDocumentByIdWithFieldMask（round 25 新增：DocumentReference 沒有 .select() 的修法）', () => {
+  const fakeFieldPath = { documentId: () => 'FieldPath.documentId()-sentinel' }
+
+  function makeFakeCollectionRef(queryResult: {
+    empty: boolean
+    size: number
+    docs: Array<{ id: string; data: () => Record<string, unknown> }>
+  }) {
+    const calls: { where?: unknown[]; select?: unknown[] } = {}
+    return {
+      path: 'fake-collection',
+      where(field: unknown, op: unknown, value: unknown) {
+        calls.where = [field, op, value]
+        return {
+          select(...fields: string[]) {
+            calls.select = fields
+            return {
+              async get() {
+                return queryResult
+              },
+            }
+          },
+        }
+      },
+      __calls: calls,
+    }
+  }
+
+  it('查無此文件（empty）→ 回傳 null', async () => {
+    const ref = makeFakeCollectionRef({ empty: true, size: 0, docs: [] })
+    const result = await getDocumentByIdWithFieldMask(ref, 'missing-id', ['a', 'b'], fakeFieldPath)
+    expect(result).toBeNull()
+  })
+
+  it('正常情況（剛好 1 筆）→ 回傳那一筆 QueryDocumentSnapshot，且用 FieldPath.documentId() 精確比對、field mask 完整傳遞', async () => {
+    const doc = { id: 'the-doc', data: () => ({ a: 1 }) }
+    const ref = makeFakeCollectionRef({ empty: false, size: 1, docs: [doc] })
+    const result = await getDocumentByIdWithFieldMask(ref, 'the-doc', ['a', 'b'], fakeFieldPath)
+    expect(result).toBe(doc)
+    expect(ref.__calls.where).toEqual(['FieldPath.documentId()-sentinel', '==', 'the-doc'])
+    expect(ref.__calls.select).toEqual(['a', 'b'])
+  })
+
+  it('查到超過 1 筆（理論上不應該發生）→ fail closed，throw，不會靜默取 docs[0]', async () => {
+    const ref = makeFakeCollectionRef({
+      empty: false,
+      size: 2,
+      docs: [
+        { id: 'dup-1', data: () => ({}) },
+        { id: 'dup-2', data: () => ({}) },
+      ],
+    })
+    await expect(getDocumentByIdWithFieldMask(ref, 'dup', ['a'], fakeFieldPath)).rejects.toThrow(/2 筆/)
+  })
+})
 
 /**
  * round 16 新增（Finding 6）：verifyBuildFreshness() 的純檔案系統層級

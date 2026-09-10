@@ -17,6 +17,12 @@ export default defineConfig({
       'tests/storageRules.test.ts',
       'tests/campaignConcurrency.test.ts',
       'tests/cleanupQueueConcurrency.test.ts',
+      // round 25 新增：audit-campaign-drain.mjs／ops-campaign-repair.mjs 的
+      // DocumentReference.select() bug 修正——用真實 Firestore emulator
+      // 驗證，需要 firebase-admin（只裝在 functions/node_modules，見
+      // functions/scripts/emulator-test-support.mjs 的說明），必須跟其他
+      // 這裡的檔案一樣透過 `npm run test:rules` 執行。
+      'tests/campaignFieldMaskEmulator.test.ts',
     ],
     // 這幾個檔案各自對本機模擬器呼叫 initializeTestEnvironment() 部署自己
     // 的一套 Storage 規則。Storage 模擬器（不像 Firestore）在多個測試檔

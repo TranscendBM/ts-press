@@ -67,12 +67,98 @@
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { isDirectExecution, verifyBuildFreshness } from './audit-utils.mjs'
+import { isDirectExecution, verifyBuildFreshness, getDocumentByIdWithFieldMask } from './audit-utils.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const compiledClassifierPath = join(here, '..', 'lib', 'campaignSend.generated.js')
 
 const KNOWN_FLAGS = new Set(['--project', '--campaign', '--action', '--confirm'])
+
+/** round 17 新增（Finding 6）：dry-run／confirm 都用這份 field mask 讀 campaign
+ *  頂層欄位——跟 audit-campaign-drain.mjs 的 CAMPAIGN_FIELDS 幾乎相同，
+ *  額外多了 pressReleaseId／isTest／mode（reconcile 的推估與
+ *  repair-press-release 動作都需要）。round 25：抽成具名常數，方便
+ *  emulator 測試斷言「敏感測試欄位確實沒被讀到」時直接引用同一份清單。 */
+export const CAMPAIGN_REPAIR_CLASSIFICATION_FIELDS = [
+  'status',
+  'recipientsReady',
+  'activeAttemptId',
+  'activeLeaseExpiresAtMs',
+  'activeLeaseExpiresAt',
+  'resolutionLeaseAttemptId',
+  'resolutionLeaseExpiresAtMs',
+  'leaseGeneration',
+  'createdByAttemptId',
+  'startedAtMs',
+  'startedAt',
+  'pressReleaseId',
+  'isTest',
+  'mode',
+]
+
+/**
+ * round 25 新增：把 main() 原本內聯的 loadClassification() 抽成模組頂層
+ * export 的工廠函式——輸入這份 campaign 的 DocumentReference，以及
+ * FieldPath／classifyCampaignForDrainAudit（呼叫端負責提供，production 從
+ * 動態載入的編譯產物拿，測試可以直接從 shared/campaignSend.ts 拿），回傳
+ * 一個 `loadClassification(nowMs)` 函式。main() 底下改成呼叫這個工廠函式，
+ * 不再自己內聯定義——這樣 emulator 整合測試才能呼叫「跟 production 100%
+ * 相同」的這份程式碼（含 round 25 修正的 getDocumentByIdWithFieldMask()
+ * 查詢邏輯），不必在測試檔案裡另外重新刻一份「看起來很像」的查詢邏輯。
+ *
+ * @param {FirebaseFirestore.DocumentReference} campaignRef
+ * @param {{FieldPath: {documentId(): FirebaseFirestore.FieldPath}, classifyCampaignForDrainAudit: Function}} deps
+ */
+export function createClassificationLoader(campaignRef, { FieldPath, classifyCampaignForDrainAudit }) {
+  const campaignId = campaignRef.id
+
+  /** round 17 新增（Finding 6）：用跟 audit-campaign-drain.mjs 完全相同的
+   *  field-mask 讀取這份 campaign 與它的收件人（不含 email／姓名／收件人
+   *  ID），交給 classifyCampaignForDrainAudit() 分類——dry-run 與真的
+   *  執行前都呼叫這個函式，兩者看到的是同一套規則。 */
+  return async function loadClassification(nowMs) {
+    // round 25 修正：campaignRef 是 DocumentReference，沒有 .select()——見
+    // audit-utils.mjs 的 getDocumentByIdWithFieldMask() 說明（跟
+    // audit-campaign-drain.mjs 的 readCampaignStabilityFields() 同一個 bug、
+    // 同一個修法）。campaignRef.parent 就是 db.collection('campaigns')，
+    // field mask（CAMPAIGN_REPAIR_CLASSIFICATION_FIELDS）維持完全不變。
+    const snap = await getDocumentByIdWithFieldMask(
+      campaignRef.parent,
+      campaignId,
+      CAMPAIGN_REPAIR_CLASSIFICATION_FIELDS,
+      FieldPath,
+    )
+    if (!snap) return { exists: false }
+    const data = snap.data()
+    const recipientsSnap = await campaignRef
+      .collection('recipients')
+      .select('status', 'leaseExpiresAtMs', 'leaseExpiresAt')
+      .get()
+    const recipients = recipientsSnap.docs.map((d) => {
+      const r = d.data()
+      return { status: r.status, leaseExpiresAtMs: r.leaseExpiresAtMs, leaseExpiresAtLegacy: r.leaseExpiresAt }
+    })
+    const classification = classifyCampaignForDrainAudit(
+      {
+        campaignId,
+        status: data.status,
+        recipientsReady: data.recipientsReady,
+        activeAttemptId: data.activeAttemptId,
+        activeLeaseExpiresAtMs: data.activeLeaseExpiresAtMs,
+        activeLeaseExpiresAtLegacy: data.activeLeaseExpiresAt,
+        resolutionLeaseAttemptId: data.resolutionLeaseAttemptId,
+        resolutionLeaseExpiresAtMs: data.resolutionLeaseExpiresAtMs,
+        leaseGeneration: data.leaseGeneration,
+        createdByAttemptId: data.createdByAttemptId,
+        startedAtMs: data.startedAtMs,
+        startedAtLegacy: data.startedAt,
+        recipients,
+      },
+      nowMs,
+    )
+    return { exists: true, data, recipients, classification }
+  }
+}
 
 /**
  * round 17 修正（Finding 6）：比 round 16 版本嚴格得多——
@@ -184,7 +270,7 @@ async function main() {
   } = await import(pathToFileURL(compiledClassifierPath).href)
 
   const { initializeApp } = await import('firebase-admin/app')
-  const { getFirestore, FieldValue, Timestamp } = await import('firebase-admin/firestore')
+  const { getFirestore, FieldValue, Timestamp, FieldPath } = await import('firebase-admin/firestore')
 
   initializeApp({ projectId: project })
   const db = getFirestore()
@@ -214,59 +300,14 @@ async function main() {
 
   const campaignRef = db.collection('campaigns').doc(campaign)
 
-  /** round 17 新增（Finding 6）：用跟 audit-campaign-drain.mjs 完全相同的
-   *  field-mask 讀取這份 campaign 與它的收件人（不含 email／姓名／收件人
-   *  ID），交給 classifyCampaignForDrainAudit() 分類——dry-run 與真的
-   *  執行前都呼叫這個函式，兩者看到的是同一套規則。 */
-  async function loadClassification(nowMs) {
-    const snap = await campaignRef
-      .select(
-        'status',
-        'recipientsReady',
-        'activeAttemptId',
-        'activeLeaseExpiresAtMs',
-        'activeLeaseExpiresAt',
-        'resolutionLeaseAttemptId',
-        'resolutionLeaseExpiresAtMs',
-        'leaseGeneration',
-        'createdByAttemptId',
-        'startedAtMs',
-        'startedAt',
-        'pressReleaseId',
-        'isTest',
-        'mode',
-      )
-      .get()
-    if (!snap.exists) return { exists: false }
-    const data = snap.data()
-    const recipientsSnap = await campaignRef
-      .collection('recipients')
-      .select('status', 'leaseExpiresAtMs', 'leaseExpiresAt')
-      .get()
-    const recipients = recipientsSnap.docs.map((d) => {
-      const r = d.data()
-      return { status: r.status, leaseExpiresAtMs: r.leaseExpiresAtMs, leaseExpiresAtLegacy: r.leaseExpiresAt }
-    })
-    const classification = classifyCampaignForDrainAudit(
-      {
-        campaignId: campaign,
-        status: data.status,
-        recipientsReady: data.recipientsReady,
-        activeAttemptId: data.activeAttemptId,
-        activeLeaseExpiresAtMs: data.activeLeaseExpiresAtMs,
-        activeLeaseExpiresAtLegacy: data.activeLeaseExpiresAt,
-        resolutionLeaseAttemptId: data.resolutionLeaseAttemptId,
-        resolutionLeaseExpiresAtMs: data.resolutionLeaseExpiresAtMs,
-        leaseGeneration: data.leaseGeneration,
-        createdByAttemptId: data.createdByAttemptId,
-        startedAtMs: data.startedAtMs,
-        startedAtLegacy: data.startedAt,
-        recipients,
-      },
-      nowMs,
-    )
-    return { exists: true, data, recipients, classification }
-  }
+  // round 25 修正：loadClassification 已經抽成模組頂層 export 的
+  // createClassificationLoader()——內容跟原本內聯在這裡的版本完全一樣
+  // （含 round 25 對 field-mask 查詢的修正），只是移到頂層讓 emulator
+  // 整合測試可以直接 import 呼叫同一份程式碼。
+  const loadClassification = createClassificationLoader(campaignRef, {
+    FieldPath,
+    classifyCampaignForDrainAudit,
+  })
 
   /** round 17 新增（Finding 6）：用 decideCampaignStatus()（跟 production
    *  finalize 用的是同一份公式）算出「如果現在執行 reconcile，最終狀態
