@@ -25,6 +25,7 @@ import {
   claimRecipientTx,
   commitRecipientResultTx,
   computeAuthoritativeRecipientTotals,
+  coordinateResolveDeliveryUnknown,
   createOrJoinCampaignTx,
   type DeliveryUnknownResolutionAction,
   finalizeCampaignTx,
@@ -399,14 +400,22 @@ describe('campaign／recipient 併發競爭（對著真正的 Firestore 驗證 s
 
   /**
    * round 8 新增、round 9 大幅修正（Finding 2／Finding 4）、round 10 再次
-   * 大幅修正（Finding 1／2／3）：delivery_unknown 的人工 resolution——現在
-   * 是完整的三段式流程：取得 resolution 租約（同時取得 fencing generation）
-   * → 在租約保護下查詢真實的收件人分佈 → transaction 內同時讀寫
-   * recipient／campaign／resolutionEvents/{resolutionId} 三份文件、重新
-   * 驗證租約與 generation、寫入結果、釋放租約。跟 functions/src/index.ts
-   * 的 resolveDeliveryUnknown callable 是同一套流程，只是這裡把步驟包成
-   * 一個方便測試呼叫的函式。recipientId 直接取 recipientRef.id，不需要
-   * 呼叫端另外傳——這樣既有呼叫這支函式的地方完全不用改參數列。
+   * 大幅修正（Finding 1／2／3）：delivery_unknown 的人工 resolution。
+   *
+   * ⚠️ round 21 修正（CI Finding 1）：過去這裡自己重新實作「取得 resolution
+   * 租約 → 查詢真實分佈 → transaction」這三段式流程，跟
+   * functions/src/index.ts 的 resolveDeliveryUnknown callable 各自維護一份
+   * 「看起來很像」的 orchestration——這正是本檔案開頭說明刻意要避免的事：
+   * 兩邊一旦漂移，測試綠燈不代表 production 是對的。而且舊版直接呼叫
+   * acquireResolutionLease，campaign 一旦已經因為前一次 resolve 變成
+   * completed／failed，這裡就會在 acquire 這一步直接被 invalid-status 擋
+   * 下，永遠讀不到本該可讀的 idempotent-replay／conflict（CI 失敗 1～3的
+   * 根本原因）。現在改成呼叫 shared/campaignSend.ts 的
+   * coordinateResolveDeliveryUnknown()——production 的 resolveDeliveryUnknown
+   * callable 呼叫的正是同一支函式，只是 refs.runTransaction／
+   * queryAuthoritativeRecipients 這裡接的是 Client SDK，production 接的是
+   * Admin SDK。recipientId 直接取 recipientRef.id，不需要呼叫端另外傳——
+   * 這樣既有呼叫這支函式的地方完全不用改參數列。
    */
   async function resolveDeliveryUnknown(
     recipientRef: DocumentReference,
@@ -419,38 +428,40 @@ describe('campaign／recipient 併發競爭（對著真正的 Firestore 驗證 s
     },
     leaseAttemptId: string,
   ) {
-    const leaseOutcome = await acquireResolutionLease(campaignRef, leaseAttemptId)
-    if (leaseOutcome.outcome !== 'acquired') {
-      return { outcome: leaseOutcome.outcome } as const
-    }
-    const resolutionGeneration = leaseOutcome.generation
-    const { totals, nonTerminalCount } = await computeTotals(campaignRef)
     const eventRef = doc(campaignRef, 'resolutionEvents', audit.resolutionId)
-    return runTransaction(db, (tx) =>
-      resolveDeliveryUnknownTx(
-        clientDocTx(tx, recipientRef),
-        clientDocTx(tx, campaignRef),
-        clientDocTx(tx, eventRef),
-        recipientRef.id,
-        totals,
-        nonTerminalCount,
-        audit,
-        leaseAttemptId,
-        resolutionGeneration,
-        Date.now(),
-        () => ({ resolvedAt: serverTimestamp() }),
-        (d) => ({
-          updatedAt: serverTimestamp(),
-          resolutionLeaseAttemptId: deleteField(),
-          resolutionLeaseExpiresAtMs: deleteField(),
-          ...(d.outcome === 'resolved'
-            ? d.campaignPatch.status === 'partial'
-              ? { completedAt: deleteField() }
-              : { completedAt: serverTimestamp() }
-            : {}),
-        }),
-        () => ({ resolvedAt: serverTimestamp() }),
-      ),
+    return coordinateResolveDeliveryUnknown(
+      {
+        runTransaction: (work) =>
+          runTransaction(db, (tx) =>
+            work((target) => {
+              const ref =
+                target === 'recipient' ? recipientRef : target === 'campaign' ? campaignRef : eventRef
+              return clientDocTx(tx, ref)
+            }),
+          ),
+        queryAuthoritativeRecipients: async () => {
+          const snap = await getDocs(collection(campaignRef, 'recipients'))
+          return snap.docs.map((d) => ({ status: d.data().status as RecipientStatus }))
+        },
+      },
+      recipientRef.id,
+      audit,
+      leaseAttemptId,
+      Date.now(),
+      RESOLUTION_LEASE_MS,
+      () => ({ updatedAt: serverTimestamp() }),
+      () => ({ resolvedAt: serverTimestamp() }),
+      (d) => ({
+        updatedAt: serverTimestamp(),
+        resolutionLeaseAttemptId: deleteField(),
+        resolutionLeaseExpiresAtMs: deleteField(),
+        ...(d.outcome === 'resolved'
+          ? d.campaignPatch.status === 'partial'
+            ? { completedAt: deleteField() }
+            : { completedAt: serverTimestamp() }
+          : {}),
+      }),
+      () => ({ resolvedAt: serverTimestamp() }),
     )
   }
 
@@ -2144,6 +2155,72 @@ describe('campaign／recipient 併發競爭（對著真正的 Firestore 驗證 s
       const campaignSnap = await getDoc(campaignRef)
       expect(campaignSnap.data()?.totals.sent).toBe(1)
       expect(campaignSnap.data()?.totals.deliveryUnknown).toBe(0)
+
+      // round 21 新增（CI Finding 1 / 必要測試 1）：這個 campaign 在 first
+      // resolve 之後已經是 terminal（completed）——第二次 idempotent-replay
+      // 必須完全是 preflight 的 fast path 產生的結果，不能重新 acquire
+      // 租約、不能再動 recipient、不能再建立第二份事件（zero writes）。
+      expect(campaignSnap.data()?.status).toBe('completed')
+      expect(campaignSnap.data()?.resolutionLeaseAttemptId).toBeUndefined()
+      const recipientSnap = await getDoc(recipientRef)
+      expect(recipientSnap.data()?.resolutionId).toBe('res-idempotent-001')
+      const events = await getDocs(collection(campaignRef, 'resolutionEvents'))
+      expect(events.size).toBe(1)
+    })
+
+    // round 21 新增（CI Finding 1 / 必要測試 2）：同一個 resolutionId、
+    // 但這次帶著不同的 payload（不同 resolvedBy／action／reason）重送——
+    // 不能被誤判成 idempotent replay，必須是 conflict；而且因為
+    // resolutionEvents/{resolutionId} 已經存在，不論 recipient 現在是什麼
+    // 狀態都必須 conflict（見 decideResolveDeliveryUnknownPreflight 的
+    // 判斷順序：event 存在時先看 payload 是否相同，不看 recipient 狀態）。
+    it('terminal campaign 上，同一個 resolutionId 但 payload 不同 → conflict（不是 idempotent-replay），zero writes', async () => {
+      const campaignRef = await seedNeedsReviewCampaign('resolve-same-id-diff-payload')
+      const recipientRef = doc(campaignRef, 'recipients', 'r1')
+      await setDoc(recipientRef, { status: 'delivery_unknown', attemptId: 'orig' })
+
+      const sharedResolutionId = 'res-same-id-diff-payload'
+      const first = await resolveDeliveryUnknown(
+        recipientRef,
+        campaignRef,
+        {
+          resolvedBy: 'admin-a@x.com',
+          resolutionId: sharedResolutionId,
+          resolutionAction: 'mark_delivered',
+          resolutionReason: 'A 確認',
+        },
+        newLeaseAttemptId(),
+      )
+      expect(first.outcome).toBe('resolved')
+
+      const campaignAfterFirst = await getDoc(campaignRef)
+      expect(campaignAfterFirst.data()?.status).toBe('completed')
+
+      // 同一個 resolutionId，但 action／reason／resolvedBy 都跟第一次不同。
+      const second = await resolveDeliveryUnknown(
+        recipientRef,
+        campaignRef,
+        {
+          resolvedBy: 'admin-b@x.com',
+          resolutionId: sharedResolutionId,
+          resolutionAction: 'force_retry',
+          resolutionReason: '跟第一次不一樣的理由',
+        },
+        newLeaseAttemptId(),
+      )
+      expect(second.outcome).toBe('conflict')
+      if (second.outcome === 'conflict') {
+        expect(second.resolvedBy).toBe('admin-a@x.com')
+        expect(second.resolutionAction).toBe('mark_delivered')
+      }
+
+      // zero writes：totals／status／resolutionEvents 都跟第一次結束時完全
+      // 一樣，第二次呼叫沒有留下任何痕跡。
+      const campaignSnap = await getDoc(campaignRef)
+      expect(campaignSnap.data()?.totals).toEqual(campaignAfterFirst.data()?.totals)
+      expect(campaignSnap.data()?.status).toBe('completed')
+      const events = await getDocs(collection(campaignRef, 'resolutionEvents'))
+      expect(events.size).toBe(1)
     })
 
     // round 9（Finding 4）：不同 resolutionId（或同 resolutionId 但不同
@@ -2166,7 +2243,9 @@ describe('campaign／recipient 併發競爭（對著真正的 Firestore 驗證 s
       )
       expect(first.outcome).toBe('resolved')
 
-      // admin B 之後才送出、帶著完全不同的 resolutionId
+      // admin B 之後才送出、帶著完全不同的 resolutionId（terminal campaign，
+      // 見 round 21 新增 / 必要測試 3：不同 resolutionId、recipient 已經被
+      // 處理過 → conflict，zero writes）。
       const second = await resolveDeliveryUnknown(
         recipientRef,
         campaignRef,
@@ -2184,7 +2263,8 @@ describe('campaign／recipient 併發競爭（對著真正的 Firestore 驗證 s
         expect(second.resolutionAction).toBe('mark_delivered')
       }
 
-      // 只有第一次真的套用，totals 不會被算兩次
+      // 只有第一次真的套用，totals 不會被算兩次；resolutionEvents 也只有
+      // 第一次那一份，'res-b' 從沒被建立過（zero writes）。
       const campaignSnap = await getDoc(campaignRef)
       const totals = campaignSnap.data()?.totals as {
         sent: number
@@ -2193,6 +2273,48 @@ describe('campaign／recipient 併發競爭（對著真正的 Firestore 驗證 s
       }
       expect(totals.deliveryUnknown).toBe(0)
       expect(totals.sent + totals.failed).toBe(1)
+      const events = await getDocs(collection(campaignRef, 'resolutionEvents'))
+      expect(events.docs.map((d) => d.id)).toEqual(['res-a'])
+    })
+
+    // round 21 新增（CI Finding 4 / 必要測試 4）：resolutionEvents/{resolutionId}
+    // 這份文件如果被外部工具或資料損毀直接寫壞（缺欄位、型別不對），
+    // decideResolveDeliveryUnknownPreflight 必須 fail closed，回傳明確的
+    // invalid-ledger-event，絕對不能誤判成 idempotent-replay 或忽略它、
+    // 讓 recipient 被重新 resolve 一次。
+    it('resolutionEvents 帳本文件損毀（缺必要欄位）→ invalid-ledger-event，fail closed，zero writes', async () => {
+      const campaignRef = await seedNeedsReviewCampaign('resolve-corrupt-ledger')
+      const recipientRef = doc(campaignRef, 'recipients', 'r1')
+      await setDoc(recipientRef, { status: 'delivery_unknown', attemptId: 'orig' })
+
+      const resolutionId = 'res-corrupt-ledger'
+      // 直接寫一份缺少 resolutionAction／resolvedBy 等必要欄位的壞文件，
+      // 繞過 resolveDeliveryUnknownTx 本來只會呼叫一次的 eventDoc.set()——
+      // 模擬資料損毀／外部工具誤寫的情境。
+      const eventRef = doc(campaignRef, 'resolutionEvents', resolutionId)
+      await setDoc(eventRef, { recipientId: 'r1', beforeStatus: 'delivery_unknown' })
+
+      const decision = await resolveDeliveryUnknown(
+        recipientRef,
+        campaignRef,
+        {
+          resolvedBy: 'admin@x.com',
+          resolutionId,
+          resolutionAction: 'mark_delivered',
+          resolutionReason: '不應該真的套用',
+        },
+        newLeaseAttemptId(),
+      )
+      expect(decision.outcome).toBe('invalid-ledger-event')
+
+      // zero writes：recipient／campaign 完全沒被動過，租約也沒被 acquire。
+      const recipientSnap = await getDoc(recipientRef)
+      expect(recipientSnap.data()?.status).toBe('delivery_unknown')
+      expect(recipientSnap.data()?.resolvedBy).toBeUndefined()
+      const campaignSnap = await getDoc(campaignRef)
+      expect(campaignSnap.data()?.status).toBe('needs_review')
+      expect(campaignSnap.data()?.resolutionLeaseAttemptId).toBeUndefined()
+      expect(campaignSnap.data()?.totals).toBeUndefined()
     })
 
     it('兩個管理員同時對同一位收件人送出不同的 resolution → 只有一個真正生效（resolved），輸家收到真實已套用的結果（conflict），totals 不會被算兩次', async () => {
@@ -2364,9 +2486,16 @@ describe('campaign／recipient 併發競爭（對著真正的 Firestore 驗證 s
         exhausted: 1,
         deliveryUnknown: 0,
       })
-      // sent(2)+failed(1)+exhausted(1) = recipients(4)，全部到達終止狀態，
-      // 且 deliveryUnknown 歸零 → 全部人都算完了，非 partial（sent>0 → completed）
-      expect(campaignSnap.data()?.status).toBe('completed')
+      // round 21 修正（CI 失敗 #4，stale test）：failed **不是**終止狀態——
+      // countNonTerminalRecipients() 明確只排除 sent／exhausted／
+      // delivery_unknown，failed 仍然算在 nonTerminalCount 裡，因為
+      // retryCampaign 還能重新認領它繼續處理。這裡的分佈是
+      // sent:2, failed:1, exhausted:1, deliveryUnknown:0，nonTerminalCount
+      // 因此是 1（那位 failed 的收件人），decideCampaignStatus() 看到
+      // nonTerminalCount>0 一律回傳 'partial'，不會是 'completed'——舊測試
+      // 誤以為「所有人都到達某種最終狀態」等於「completed」，混淆了
+      // 「這位收件人不會再被動」跟「這個 campaign 已經收尾完成」兩件事。
+      expect(campaignSnap.data()?.status).toBe('partial')
     })
 
     it('force_retry 後，campaign totals 精確等於真實 recipients 分佈', async () => {
@@ -2472,9 +2601,22 @@ describe('campaign／recipient 併發競爭（對著真正的 Firestore 驗證 s
       })
       expect(lateCommit.applied).toBe(false)
 
+      // round 21 修正（CI 失敗 #5，stale test）：sweep 呼叫時明確傳入
+      // errorMessage="sweep"，decideReclaimExpiredDeliveryAttempt 的 patch
+      // 會把它寫進 lastError（見 shared/campaignSend.ts 該函式）——sweep
+      // 之後 recipient 已經不再持有 attemptId／lease，任何遲到的舊 commit
+      // （不論想寫的是自己的 lastError「A 遲來的錯誤回報」還是別的）都必須
+      // 被拒絕、完全不能生效，所以 lastError 應該仍然停留在 sweep 當時寫入
+      // 的 'sweep'，而不是變成 undefined（舊測試的期望）或被遲到 commit 的
+      // 'A 遲來的錯誤回報' 蓋掉（兩者都代表遲到的 commit 錯誤地生效了）。
       const snap = await getDoc(recipientRef)
       expect(snap.data()?.status).toBe('delivery_unknown')
-      expect(snap.data()?.lastError).toBeUndefined()
+      expect(snap.data()?.lastError).toBe('sweep')
+      expect(snap.data()?.lastError).not.toBe('A 遲來的錯誤回報')
+      // sweep 清掉的 attemptId／lease 欄位也必須維持在安全的 post-sweep
+      // 狀態，沒有被遲到的 commit 動過。
+      expect(snap.data()?.attemptId ?? null).toBeNull()
+      expect(snap.data()?.leaseExpiresAtMs ?? null).toBeNull()
     })
 
     it('mark_delivered resolution 之後，姍姍來遲的舊 SMTP commit 不可覆寫人工決定的結果', async () => {
@@ -2814,9 +2956,26 @@ describe('campaign／recipient 併發競爭（對著真正的 Firestore 驗證 s
       const { totals, nonTerminalCount } = await computeTotals(campaignRef)
 
       // A 在這之後才呼叫 claim，帶著自己（舊）的 generation=1。
+      //
+      // round 21 修正（CI 失敗 #6，stale test，非 production bug）：這個
+      // fixture 同時讓兩個 reject 條件成立——(a) campaign.activeLeaseExpiresAtMs
+      // 已經過期（seed 時特意設成 Date.now()-1000），(b) resolution 已經把
+      // leaseGeneration 從 1 推進到 2，A 帶著舊的 generation=1 送出。
+      // decideRecipientClaim（shared/campaignSend.ts）的檢查順序固定是
+      // ownership → lease-active → generation，租約過期的檢查排在
+      // generation 之前，所以先命中的一定是 campaign-lease-expired，不會
+      // 走到 campaign-generation-mismatch 那個分支——這不是需要修的
+      // production bug，只是舊測試期望了一個跟現有 precedence 不符的字串。
+      // 是否應該把 generation 檢查移到 lease-active 之前？沒有理由這麼做：
+      // 兩個檢查都是 fail closed，最終結果（claimable:false、recipient
+      // 完全不被動）完全相同，調換順序不會改變安全性，只會讓 reason 字串
+      // 換一個，卻要冒著打亂其他依賴這個順序／這個字串的呼叫端與測試的
+      // 風險（見下面 tests/campaignSend.test.ts 新增的 generation-mismatch
+      // 獨立案例，那裡才是真正測「generation 不符、但租約仍然有效」這個
+      // 條件的地方，不會跟 lease-expired 混在一起）。
       const staleClaim = await claim(recipientRef, campaignRef, 'attempt-A', 1)
       expect(staleClaim.claimable).toBe(false)
-      expect(staleClaim.reason).toBe('campaign-generation-mismatch')
+      expect(staleClaim.reason).toBe('campaign-lease-expired')
 
       const afterStaleClaim = await getDoc(recipientRef)
       expect(afterStaleClaim.data()?.status).toBe('failed')

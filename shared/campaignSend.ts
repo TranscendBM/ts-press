@@ -3526,12 +3526,54 @@ export interface ResolutionEventRecord {
   afterStatus: 'sent' | 'failed'
 }
 
+/**
+ * round 21 新增（CI Finding 4）：讀回 resolutionEvents/{resolutionId} 時
+ * 過去直接對 eventSnap.data 的每個欄位做 `as` type cast，完全沒有驗證
+ * 實際存到 Firestore 裡的內容真的符合 ResolutionEventRecord 的形狀——
+ * 一份損毀／被外部工具直接寫壞的 ledger 文件會被無條件當成合法的
+ * idempotent-replay 或 conflict 依據。這支函式是唯一的讀回驗證入口，
+ * 供 decideResolveDeliveryUnknown 與新的 decideResolveDeliveryUnknownPreflight
+ * 共用，確保兩處判斷完全一致；驗證失敗一律 fail closed，回傳 null，呼叫端
+ * 必須回報明確的 invalid-ledger-event，絕不能把它當成 idempotent-replay。
+ */
+export function parseResolutionEventRecord(
+  data: Record<string, unknown> | undefined,
+): ResolutionEventRecord | null {
+  if (!data) return null
+  if (typeof data.recipientId !== 'string' || data.recipientId.trim().length === 0) return null
+  if (data.resolutionAction !== 'mark_delivered' && data.resolutionAction !== 'force_retry') {
+    return null
+  }
+  if (typeof data.resolutionReason !== 'string' || data.resolutionReason.trim().length === 0) {
+    return null
+  }
+  if (typeof data.resolvedBy !== 'string' || data.resolvedBy.trim().length === 0) return null
+  if (data.beforeStatus !== 'delivery_unknown') return null
+  if (data.afterStatus !== 'sent' && data.afterStatus !== 'failed') return null
+  if (!isSafeNonNegativeInteger(data.fencingGeneration) || (data.fencingGeneration as number) < 1) {
+    return null
+  }
+  return {
+    recipientId: data.recipientId,
+    resolutionAction: data.resolutionAction,
+    resolutionReason: data.resolutionReason,
+    resolvedBy: data.resolvedBy,
+    beforeStatus: 'delivery_unknown',
+    afterStatus: data.afterStatus,
+    fencingGeneration: data.fencingGeneration as number,
+  }
+}
+
 export type ResolveDeliveryUnknownDecision =
   | { outcome: 'campaign-not-found' }
   | { outcome: 'recipient-not-found' }
   /** 呼叫這支的 invocation 已經不再持有 resolution 租約（理論上不該發生：
    *  租約時長只需要涵蓋一次查詢＋一次 transaction，這裡是防禦性檢查）。 */
   | { outcome: 'resolution-lease-lost' }
+  /** round 21 新增（CI Finding 4）：resolutionEvents/{resolutionId} 這份
+   *  文件存在，但內容無法通過 parseResolutionEventRecord 驗證——fail
+   *  closed，絕不能當成 idempotent-replay 或忽略它繼續往下 resolve。 */
+  | { outcome: 'invalid-ledger-event' }
   /** authoritativeTotals／authoritativeNonTerminalCount 的形狀不合理，
    *  或跟這位收件人「本身就是 delivery_unknown」矛盾——fail closed。 */
   | { outcome: 'invalid-authoritative-totals' }
@@ -3639,8 +3681,14 @@ export function decideResolveDeliveryUnknown(
   const recipientData = recipientSnap.data
 
   // Finding 3：先看 immutable event ledger，不看 recipient 目前的可變狀態。
+  // round 21 修正（CI Finding 4）：不再對 eventSnap.data 的欄位做未經驗證的
+  // `as` cast——先用 parseResolutionEventRecord 完整驗證形狀，驗證失敗
+  // （損毀的 ledger 文件）一律 fail closed，絕不能當成 idempotent-replay。
   if (eventSnap.exists && eventSnap.data) {
-    const event = eventSnap.data
+    const event = parseResolutionEventRecord(eventSnap.data)
+    if (!event) {
+      return { outcome: 'invalid-ledger-event' }
+    }
     const sameRequest =
       event.recipientId === recipientId &&
       event.resolutionAction === audit.resolutionAction &&
@@ -3649,18 +3697,18 @@ export function decideResolveDeliveryUnknown(
     if (sameRequest) {
       return {
         outcome: 'idempotent-replay',
-        recipientStatus: event.afterStatus as 'sent' | 'failed',
-        resolvedBy: event.resolvedBy as string,
-        resolutionAction: event.resolutionAction as DeliveryUnknownResolutionAction,
-        resolutionReason: event.resolutionReason as string,
+        recipientStatus: event.afterStatus,
+        resolvedBy: event.resolvedBy,
+        resolutionAction: event.resolutionAction,
+        resolutionReason: event.resolutionReason,
       }
     }
     return {
       outcome: 'conflict',
       recipientStatus: recipientData.status as RecipientStatus,
-      resolvedBy: event.resolvedBy as string | undefined,
-      resolutionAction: event.resolutionAction as DeliveryUnknownResolutionAction | undefined,
-      resolutionReason: event.resolutionReason as string | undefined,
+      resolvedBy: event.resolvedBy,
+      resolutionAction: event.resolutionAction,
+      resolutionReason: event.resolutionReason,
     }
   }
 
@@ -3806,6 +3854,253 @@ export async function resolveDeliveryUnknownTx(
     campaignDoc.update({ ...buildCampaignExtra(decision) })
   }
   return decision
+}
+
+// ---------------------------------------------------------------------------
+// round 21 新增（CI Finding 1）：resolveDeliveryUnknown 的 replay／conflict
+// preflight——修正「acquireResolutionLeaseTx 在 campaign 已經 completed／
+// failed 之後一律回傳 invalid-status，導致 idempotent-replay／conflict 永遠
+// 讀不到」的問題。
+//
+// 根本原因：decideAcquireResolutionLease 只檢查 campaign 本身的狀態／租約／
+// generation，完全不知道 resolutionEvents/{resolutionId} 或 recipient 現在
+// 是什麼狀態；decideResolveDeliveryUnknown 才會讀 event／recipient，但它只
+// 在成功取得 resolution 租約「之後」才會被呼叫到。當第一次 resolve 已經把
+// campaign 帶進 completed／failed（terminal，不再 isResolutionEligible）之
+// 後，第二次同 resolutionId 的重送、或另一個 resolutionId 針對同一位已經
+// 被處理掉的收件人送出的請求，會在 acquire 這一步就被擋下、回傳
+// invalid-status——呼叫端沒有機會知道「其實是重送」或「其實已經被別人處理
+// 過」，這違反 ResolutionEventRecord／decideResolveDeliveryUnknown 上方
+// 記載的 idempotent-replay／conflict 契約。
+//
+// 修正方式：新增一個純讀取、不取任何租約、不做任何寫入的 preflight——直接
+// 把 decideResolveDeliveryUnknown 判斷 event／recipient 的那段邏輯獨立出來，
+// 在嘗試 acquire resolution 租約「之前」先跑一次。只要 preflight 判斷出
+// idempotent-replay／conflict／invalid-ledger-event／recipient-not-found，
+// 就不需要（也不應該）再去 acquire 租約——這些結果在 campaign 是否 terminal
+// 之下都必須可讀到，但也都絕對不能反過來重新 acquire 租約、動 recipient、
+// 動 campaign totals／status、或建立第二個事件。只有 preflight 判斷「event
+// 不存在、recipient 現在確實還是 delivery_unknown」（'proceed'）時，才會
+// 繼續往下 acquire 租約、查詢 authoritative totals、進最終的
+// resolveDeliveryUnknownTx transaction。
+//
+// ⚠️ preflight 是 fast-path，不是最終的權威判斷——它讀完到最終 transaction
+// 真正提交之間仍然有競態窗口（另一個 invocation 可能在這之間搶到租約、完成
+// resolve）。所以：
+// - acquireResolutionLeaseTx／resolveDeliveryUnknownTx 完全不變，仍然在自己
+//   的 transaction 裡重新讀一次 lease／generation／event／recipient 並重新
+//   判斷——preflight 的結果絕不取代它們的重新驗證。
+// - coordinateResolveDeliveryUnknown（見下方）處理了 preflight 說可以
+//   proceed、但實際 acquire 租約時才發現 campaign 已經變成 invalid-status
+//   的競態：這代表兩次 preflight 讀取之間，campaign 被另一個 invocation
+//   推進到了 terminal 狀態，所以會再跑一次 preflight 取得權威原因（多半是
+//   idempotent-replay／conflict），而不是把原始的 invalid-status 直接丟給
+//   使用者。
+// ---------------------------------------------------------------------------
+
+export type ResolveDeliveryUnknownPreflightDecision =
+  | { outcome: 'campaign-not-found' }
+  | { outcome: 'recipient-not-found' }
+  | { outcome: 'invalid-ledger-event' }
+  | {
+      outcome: 'idempotent-replay'
+      recipientStatus: 'sent' | 'failed'
+      resolvedBy: string
+      resolutionAction: DeliveryUnknownResolutionAction
+      resolutionReason: string
+    }
+  | {
+      outcome: 'conflict'
+      recipientStatus: RecipientStatus
+      resolvedBy?: string
+      resolutionAction?: DeliveryUnknownResolutionAction
+      resolutionReason?: string
+    }
+  /** event 不存在，recipient 現在確實還是 delivery_unknown——可以（也應該）
+   *  繼續往下嘗試 acquire resolution 租約，不能在這裡直接當成任何一種
+   *  「已經有結果」的 outcome。呼叫端不應該把這個值原樣回傳給使用者。 */
+  | { outcome: 'proceed' }
+
+/**
+ * 純函式、唯讀：不取租約、不寫入任何東西。判斷順序跟
+ * decideResolveDeliveryUnknown 裡 event／recipient 那段完全一致（共用同一個
+ * parseResolutionEventRecord），刻意保持這兩處判斷不會分岔。
+ */
+export function decideResolveDeliveryUnknownPreflight(
+  recipientSnap: DocSnapshotLike,
+  campaignSnap: DocSnapshotLike,
+  eventSnap: DocSnapshotLike,
+  recipientId: string,
+  audit: ResolveDeliveryUnknownAudit,
+): ResolveDeliveryUnknownPreflightDecision {
+  if (!campaignSnap.exists || !campaignSnap.data) return { outcome: 'campaign-not-found' }
+  if (!recipientSnap.exists || !recipientSnap.data) return { outcome: 'recipient-not-found' }
+  const recipientData = recipientSnap.data
+
+  if (eventSnap.exists && eventSnap.data) {
+    const event = parseResolutionEventRecord(eventSnap.data)
+    if (!event) return { outcome: 'invalid-ledger-event' }
+    const sameRequest =
+      event.recipientId === recipientId &&
+      event.resolutionAction === audit.resolutionAction &&
+      event.resolutionReason === audit.resolutionReason &&
+      event.resolvedBy === audit.resolvedBy
+    if (sameRequest) {
+      return {
+        outcome: 'idempotent-replay',
+        recipientStatus: event.afterStatus,
+        resolvedBy: event.resolvedBy,
+        resolutionAction: event.resolutionAction,
+        resolutionReason: event.resolutionReason,
+      }
+    }
+    return {
+      outcome: 'conflict',
+      recipientStatus: recipientData.status as RecipientStatus,
+      resolvedBy: event.resolvedBy,
+      resolutionAction: event.resolutionAction,
+      resolutionReason: event.resolutionReason,
+    }
+  }
+
+  if (recipientData.status !== 'delivery_unknown') {
+    return {
+      outcome: 'conflict',
+      recipientStatus: recipientData.status as RecipientStatus,
+      resolvedBy: recipientData.resolvedBy as string | undefined,
+      resolutionAction: recipientData.resolutionAction as DeliveryUnknownResolutionAction | undefined,
+      resolutionReason: recipientData.resolutionReason as string | undefined,
+    }
+  }
+
+  return { outcome: 'proceed' }
+}
+
+/** 把 preflight 包成跟其他 *Tx 函式一致的介面（唯讀，不會呼叫 set／update）。
+ *  刻意設計成可以在自己單獨的 transaction／單獨的一組 .get() 裡執行，
+ *  不要求跟 acquireResolutionLeaseTx 或 resolveDeliveryUnknownTx 共用同一個
+ *  transaction——preflight 本來就只是 fast path，不需要跟它們的原子性綁在
+ *  一起（也綁不了：它必須在 acquire 租約「之前」跑）。 */
+export async function resolveDeliveryUnknownPreflightTx(
+  recipientDoc: DocTx,
+  campaignDoc: DocTx,
+  eventDoc: DocTx,
+  recipientId: string,
+  audit: ResolveDeliveryUnknownAudit,
+): Promise<ResolveDeliveryUnknownPreflightDecision> {
+  const recipientSnap = await recipientDoc.get()
+  const campaignSnap = await campaignDoc.get()
+  const eventSnap = await eventDoc.get()
+  return decideResolveDeliveryUnknownPreflight(recipientSnap, campaignSnap, eventSnap, recipientId, audit)
+}
+
+/** coordinateResolveDeliveryUnknown 對外回傳的結果——刻意排除 preflight 的
+ *  'proceed'：那只是內部控制流程，絕不應該被當成最終結果回傳給呼叫端。 */
+export type CoordinateResolveDeliveryUnknownResult =
+  | Exclude<ResolveDeliveryUnknownPreflightDecision, { outcome: 'proceed' }>
+  | Exclude<AcquireResolutionLeaseDecision, { outcome: 'acquired' }>
+  | ResolveDeliveryUnknownDecision
+
+export interface CoordinateResolveDeliveryUnknownRefs {
+  /** 建一個新的 transaction，在裡面透過 mk('recipient'|'campaign'|'event')
+   *  取得對應文件的 DocTx。production 用 db.runTransaction + docTx()；
+   *  emulator 測試用 firebase/firestore 的 runTransaction + 對應的
+   *  clientDocTx()——兩邊只是 wiring 不同，實際跑的判斷邏輯（本檔案）完全
+   *  相同，這正是這支協調函式存在的目的：production callable 與 emulator
+   *  測試不能再各自維護一份可能漂移的 orchestration 複製品。 */
+  runTransaction<T>(
+    work: (mk: (target: 'recipient' | 'campaign' | 'event') => DocTx) => Promise<T>,
+  ): Promise<T>
+  /** 在 resolution 租約保護下（呼叫方必須確認已經成功 acquire 之後才會呼叫
+   *  這裡），非交易地查出目前真實的收件人狀態分佈，供
+   *  computeAuthoritativeRecipientTotals 使用。 */
+  queryAuthoritativeRecipients(): Promise<RecipientStatusForTotals[]>
+}
+
+/**
+ * round 21 新增（CI Finding 1）：resolveDeliveryUnknown 唯一的協調流程，
+ * production（functions/src/index.ts 的 resolveDeliveryUnknown callable）
+ * 與 emulator 測試（tests/campaignConcurrency.test.ts 的本地 helper）都必須
+ * 呼叫這支，不能各自重新實作一份可能漂移的版本（見上方 refs 參數的說明）。
+ *
+ * 步驟：
+ * 1. preflight（唯讀，不取租約）——event 已存在或 recipient 已經不是
+ *    delivery_unknown，直接回傳 idempotent-replay／conflict／
+ *    invalid-ledger-event／recipient-not-found／campaign-not-found，
+ *    完全不去 acquire 租約。
+ * 2. 只有 preflight 回傳 'proceed' 才 acquire resolution 租約。
+ *    - 如果這裡回傳 invalid-status：代表 preflight 讀完之後、acquire 之前，
+ *      另一個 invocation 已經搶先完成了 resolve、把 campaign 帶進
+ *      terminal 狀態——重新跑一次 preflight 取得權威原因（多半會是
+ *      idempotent-replay／conflict），不能把原始 invalid-status 直接丟給
+ *      使用者（那就是這次修正要解決的原始問題）。如果重新 preflight 仍然是
+ *      'proceed'，代表真的是其他原因（例如 campaign 資料本身壞了），原樣
+ *      回傳 invalid-status。
+ *    - acquire 失敗的其他 outcome（not-found／not-ready／
+ *      processing-lease-active／resolution-lease-held／invalid-generation／
+ *      generation-exhausted）原樣回傳，不需要特別處理。
+ * 3. acquire 成功後，查詢 authoritative totals、進最終的
+ *    resolveDeliveryUnknownTx transaction——這一步完全不變，仍然會自己重新
+ *    驗證 lease／generation／event／recipient（見該函式的說明），preflight
+ *    的結果不能、也沒有取代這裡的重新驗證。
+ */
+export async function coordinateResolveDeliveryUnknown(
+  refs: CoordinateResolveDeliveryUnknownRefs,
+  recipientId: string,
+  audit: ResolveDeliveryUnknownAudit,
+  resolutionLeaseAttemptId: string,
+  nowMs: number,
+  leaseMs: number,
+  buildLeaseExtra: (decision: AcquireResolutionLeaseDecision) => Record<string, unknown> = () => ({}),
+  buildRecipientExtra: (
+    decision: ResolveDeliveryUnknownDecision,
+  ) => Record<string, unknown> = () => ({}),
+  buildCampaignExtra: (
+    decision: ResolveDeliveryUnknownDecision,
+  ) => Record<string, unknown> = () => ({}),
+  buildEventExtra: (decision: ResolveDeliveryUnknownDecision) => Record<string, unknown> = () => ({}),
+): Promise<CoordinateResolveDeliveryUnknownResult> {
+  const runPreflight = () =>
+    refs.runTransaction((mk) =>
+      resolveDeliveryUnknownPreflightTx(mk('recipient'), mk('campaign'), mk('event'), recipientId, audit),
+    )
+
+  const preflight = await runPreflight()
+  if (preflight.outcome !== 'proceed') return preflight
+
+  const leaseDecision = await refs.runTransaction((mk) =>
+    acquireResolutionLeaseTx(mk('campaign'), resolutionLeaseAttemptId, nowMs, leaseMs, buildLeaseExtra),
+  )
+  if (leaseDecision.outcome === 'invalid-status') {
+    // 競態：preflight 讀完之後、acquire 之前，另一個 invocation 已經把
+    // campaign 帶進了 terminal 狀態——重新問一次權威原因，不要把
+    // invalid-status 原樣丟出去（那正是這次要修的問題）。
+    const recheck = await runPreflight()
+    if (recheck.outcome !== 'proceed') return recheck
+    return leaseDecision
+  }
+  if (leaseDecision.outcome !== 'acquired') return leaseDecision
+
+  const recipients = await refs.queryAuthoritativeRecipients()
+  const { totals, nonTerminalCount } = computeAuthoritativeRecipientTotals(recipients)
+
+  return refs.runTransaction((mk) =>
+    resolveDeliveryUnknownTx(
+      mk('recipient'),
+      mk('campaign'),
+      mk('event'),
+      recipientId,
+      totals,
+      nonTerminalCount,
+      audit,
+      resolutionLeaseAttemptId,
+      leaseDecision.generation,
+      nowMs,
+      buildRecipientExtra,
+      buildCampaignExtra,
+      buildEventExtra,
+    ),
+  )
 }
 
 // ---------------------------------------------------------------------------

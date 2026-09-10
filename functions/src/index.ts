@@ -48,7 +48,6 @@ import {
 } from './pressCleanup.generated'
 import {
   acquireCampaignLeaseTx,
-  acquireResolutionLeaseTx,
   areAllRecipientStatusesKnown,
   beginDeliveryAttemptTx,
   CAMPAIGN_FUNCTION_TIMEOUT_MS,
@@ -57,6 +56,7 @@ import {
   classifyCampaignForDrainAudit,
   commitRecipientResultTx,
   computeAuthoritativeRecipientTotals,
+  coordinateResolveDeliveryUnknown,
   createOrJoinCampaignTx,
   finalizeCampaignWithPressReleaseTx,
   isValidIdempotencyKey,
@@ -73,7 +73,6 @@ import {
   RECIPIENTS_SETUP_STALE_MS,
   RESOLUTION_LEASE_MS,
   resolveCampaignResume,
-  resolveDeliveryUnknownTx,
   runSendPhase,
   SEND_BATCH_LIMIT,
   selectRecipientsToProcess,
@@ -83,9 +82,9 @@ import {
   SMTP_SEND_WALL_CLOCK_TIMEOUT_MS,
   SMTP_SOCKET_TIMEOUT_MS,
   type AcquireLeaseDecision,
-  type AcquireResolutionLeaseDecision,
   type CampaignFinalizeStatus,
   type CampaignStatus,
+  type CoordinateResolveDeliveryUnknownRefs,
   type DeliveryUnknownResolutionAction,
   type DocSnapshotLike,
   type DocTx,
@@ -2210,33 +2209,6 @@ export const retryCampaign = onCall<{ campaignId: string }>(
 )
 
 /**
- * 嘗試取得 campaign 的 resolution 租約（round 9 新增，見
- * shared/campaignSend.ts 的說明：跟處理租約互斥，保護「查詢真實收件人
- * 分佈＋寫入 resolution 結果」這段操作不被一般寄送或另一個 resolution
- * 打斷）。
- */
-async function acquireResolutionLease(
-  campaignRef: FirebaseFirestore.DocumentReference,
-  attemptId: string,
-): Promise<AcquireResolutionLeaseDecision> {
-  return db.runTransaction((tx) =>
-    acquireResolutionLeaseTx(
-      docTx(tx, campaignRef),
-      attemptId,
-      Date.now(),
-      RESOLUTION_LEASE_MS,
-      // round 10 新增（Finding 2）：對稱於 acquireCampaignLease，acquired
-      // 時順手清掉已經證明失效的處理租約殘留欄位。
-      () => ({
-        updatedAt: FieldValue.serverTimestamp(),
-        activeAttemptId: FieldValue.delete(),
-        activeLeaseExpiresAtMs: FieldValue.delete(),
-      }),
-    ),
-  )
-}
-
-/**
  * best-effort 釋放 resolution 租約：只在「取得租約之後、resolveDeliveryUnknownTx
  * 那個 transaction 本身還沒跑到（或跑到一半意外拋錯）」這種意外情況才會
  * 用到——正常路徑（不論哪一種 outcome）都已經在 resolveDeliveryUnknownTx
@@ -2293,10 +2265,25 @@ async function releaseResolutionLeaseBestEffort(
  * action／reason）處理掉，回報 conflict，不能靜默當成功。
  *
  * 核心的分岔邏輯都在 shared/campaignSend.ts 的
- * decideResolveDeliveryUnknown()／resolveDeliveryUnknownTx()，這裡只負責：
- * requireAdmin 身分驗證、輸入格式驗證、resolution 租約的取得與釋放、
- * authoritative 查詢、把 Admin SDK 的 transaction 接成該函式需要的
- * DocTx，以及把 transaction 真實的 outcome 分類成 HttpsError 或正常回應。
+ * coordinateResolveDeliveryUnknown()（round 21 新增；內部依序呼叫
+ * decideResolveDeliveryUnknownPreflight()／acquireResolutionLeaseTx()／
+ * resolveDeliveryUnknownTx()，見該函式上方的完整流程說明），這裡只負責：
+ * requireAdmin 身分驗證、輸入格式驗證、把 Admin SDK 的 transaction／查詢
+ * 接成該函式需要的 refs，以及把 outcome 分類成 HttpsError 或正常回應。
+ *
+ * ⚠️ round 21 修正（CI Finding 1）：過去這裡「直接」呼叫
+ * acquireResolutionLeaseTx，一旦 campaign 已經因為第一次 resolve 變成
+ * completed／failed（terminal），第二次同 resolutionId 的重送、或另一個
+ * resolutionId 針對同一位已經被處理掉的收件人送出的請求，會在這一步就被
+ * acquireResolutionLeaseTx 擋下、回傳 invalid-status——呼叫端沒有機會知道
+ * 「其實是重送」或「其實已經被別人處理過」，讀不到本該可讀的
+ * idempotent-replay／conflict。coordinateResolveDeliveryUnknown 在嘗試
+ * acquire 租約之前先跑一次唯讀 preflight，這個問題不再需要在這裡處理，
+ * 這個 callable 只需要把 preflight／lease／最終 transaction 三個階段可能
+ * 回傳的所有 outcome 分類成對應的 HttpsError 即可。emulator 整合測試
+ *（tests/campaignConcurrency.test.ts）也改成呼叫同一支
+ * coordinateResolveDeliveryUnknown，不再各自維護一份可能漂移的
+ * orchestration 複製品。
  */
 export const resolveDeliveryUnknown = onCall<{
   campaignId: string
@@ -2333,89 +2320,109 @@ export const resolveDeliveryUnknown = onCall<{
 
   const campaignRef = db.collection('campaigns').doc(campaignId)
   const recipientRef = campaignRef.collection('recipients').doc(recipientId)
+  const eventRef = campaignRef.collection('resolutionEvents').doc(resolutionId)
   // 這個 invocation 自己的租約鎖 token——跟 resolutionId（代表「這一次
   // 人類操作意圖」，重送不變）是完全不同的概念，每次呼叫都換新的。
   const leaseAttemptId = randomUUID()
+  const audit = { resolvedBy: user.email, resolutionId, resolutionAction: action, resolutionReason }
 
-  const leaseDecision = await acquireResolutionLease(campaignRef, leaseAttemptId)
-  if (leaseDecision.outcome === 'not-found') {
-    throw new HttpsError('not-found', '找不到這筆發送紀錄。')
+  const refs: CoordinateResolveDeliveryUnknownRefs = {
+    runTransaction: (work) =>
+      db.runTransaction((tx) =>
+        work((target) => {
+          const ref = target === 'recipient' ? recipientRef : target === 'campaign' ? campaignRef : eventRef
+          return docTx(tx, ref)
+        }),
+      ),
+    queryAuthoritativeRecipients: async () => {
+      const recipientsSnap = await campaignRef.collection('recipients').get()
+      return recipientsSnap.docs.map((d) => ({ status: (d.data() as RecipientDoc).status }))
+    },
   }
-  // round 11 新增（Finding 3）：campaign 還在建立收件人清單，或已經是
-  // completed／failed／未知狀態，不可能還有合法待處理的 delivery_unknown
-  // ——見 shared/campaignSend.ts 的 decideAcquireResolutionLease 說明，
-  // 用 failed-precondition 而不是 internal，讓前端知道這是「這個操作在
-  // 目前狀態下本來就不合法」，不是意外的伺服器錯誤。
-  if (leaseDecision.outcome === 'not-ready') {
-    throw new HttpsError('failed-precondition', '這筆發送的收件人清單尚未建立完成，無法進行人工處理。')
-  }
-  if (leaseDecision.outcome === 'invalid-status') {
-    throw new HttpsError(
-      'failed-precondition',
-      '這筆發送目前的狀態不可能還有待人工處理的收件人。',
-    )
-  }
-  if (leaseDecision.outcome === 'processing-lease-active') {
-    throw new HttpsError('aborted', '這筆發送目前正在寄送中，請稍後再試一次。')
-  }
-  if (leaseDecision.outcome === 'resolution-lease-held') {
-    throw new HttpsError('aborted', '另一位管理員正在處理這筆發送，請稍後再試一次。')
-  }
-  // round 13 新增（Finding 1）：見 acquireCampaignLease 對稱的檢查說明。
-  if (leaseDecision.outcome === 'invalid-generation' || leaseDecision.outcome === 'generation-exhausted') {
-    logger.error('acquireResolutionLease：campaign.leaseGeneration 異常，拒絕核發租約', {
-      campaignPath: campaignRef.path,
-      outcome: leaseDecision.outcome,
-    })
-    throw new HttpsError(
-      'internal',
-      '這筆發送的內部狀態異常，無法安全處理，請聯絡工程人員檢查 Firestore 資料。',
-    )
-  }
-  const resolutionGeneration = leaseDecision.generation
 
   try {
-    const recipientsSnap = await campaignRef.collection('recipients').get()
-    const { totals: authoritativeTotals, nonTerminalCount: authoritativeNonTerminalCount } =
-      computeAuthoritativeRecipientTotals(
-        recipientsSnap.docs.map((d) => ({ status: (d.data() as RecipientDoc).status })),
-      )
-
-    const eventRef = campaignRef.collection('resolutionEvents').doc(resolutionId)
-    const decision = await db.runTransaction((tx) =>
-      resolveDeliveryUnknownTx(
-        docTx(tx, recipientRef),
-        docTx(tx, campaignRef),
-        docTx(tx, eventRef),
-        recipientId,
-        authoritativeTotals,
-        authoritativeNonTerminalCount,
-        { resolvedBy: user.email, resolutionId, resolutionAction: action, resolutionReason },
-        leaseAttemptId,
-        resolutionGeneration,
-        Date.now(),
-        () => ({ resolvedAt: FieldValue.serverTimestamp() }),
-        (d) => ({
-          updatedAt: FieldValue.serverTimestamp(),
-          resolutionLeaseAttemptId: FieldValue.delete(),
-          resolutionLeaseExpiresAtMs: FieldValue.delete(),
-          // partial（force_retry 且產生了新的非終止收件人）代表 campaign
-          // 重新變成「可以繼續處理」，不再是收尾完成的狀態，completedAt 要
-          // 清掉；其餘（mark_delivered，或 force_retry 剛好讓所有收件人都
-          // 到達終止狀態）都是收尾完成，更新成這次 resolution 真正發生的
-          // 時間。
-          ...(d.outcome === 'resolved'
-            ? d.campaignPatch.status === 'partial'
-              ? { completedAt: FieldValue.delete() }
-              : { completedAt: FieldValue.serverTimestamp() }
-            : {}),
-        }),
-        () => ({ resolvedAt: FieldValue.serverTimestamp() }),
-      ),
+    const decision = await coordinateResolveDeliveryUnknown(
+      refs,
+      recipientId,
+      audit,
+      leaseAttemptId,
+      Date.now(),
+      RESOLUTION_LEASE_MS,
+      // round 10 新增（Finding 2）：對稱於 acquireCampaignLease，acquired
+      // 時順手清掉已經證明失效的處理租約殘留欄位。
+      () => ({
+        updatedAt: FieldValue.serverTimestamp(),
+        activeAttemptId: FieldValue.delete(),
+        activeLeaseExpiresAtMs: FieldValue.delete(),
+      }),
+      () => ({ resolvedAt: FieldValue.serverTimestamp() }),
+      (d) => ({
+        updatedAt: FieldValue.serverTimestamp(),
+        resolutionLeaseAttemptId: FieldValue.delete(),
+        resolutionLeaseExpiresAtMs: FieldValue.delete(),
+        // partial（force_retry 且產生了新的非終止收件人）代表 campaign
+        // 重新變成「可以繼續處理」，不再是收尾完成的狀態，completedAt 要
+        // 清掉；其餘（mark_delivered，或 force_retry 剛好讓所有收件人都
+        // 到達終止狀態）都是收尾完成，更新成這次 resolution 真正發生的
+        // 時間。
+        ...(d.outcome === 'resolved'
+          ? d.campaignPatch.status === 'partial'
+            ? { completedAt: FieldValue.delete() }
+            : { completedAt: FieldValue.serverTimestamp() }
+          : {}),
+      }),
+      () => ({ resolvedAt: FieldValue.serverTimestamp() }),
     )
 
+    // round 21：lease-acquisition 階段的 outcome（跟原本的行為完全一致，
+    // 只是現在是從 coordinateResolveDeliveryUnknown 的回傳值分類，不是從
+    // acquireResolutionLease 這個已經移除的本地 helper）。
+    if (decision.outcome === 'not-found') {
+      throw new HttpsError('not-found', '找不到這筆發送紀錄。')
+    }
+    // round 11 新增（Finding 3）：campaign 還在建立收件人清單，不可能還有
+    // 合法待處理的 delivery_unknown——見 shared/campaignSend.ts 的
+    // decideAcquireResolutionLease 說明，用 failed-precondition 而不是
+    // internal，讓前端知道這是「這個操作在目前狀態下本來就不合法」，不是
+    // 意外的伺服器錯誤。
+    if (decision.outcome === 'not-ready') {
+      throw new HttpsError('failed-precondition', '這筆發送的收件人清單尚未建立完成，無法進行人工處理。')
+    }
+    // round 21 修正（CI Finding 1）：這裡現在只會在 preflight 也判斷「還
+    // 沒有 event、recipient 確實還是 delivery_unknown」卻仍然拿不到租約時
+    // 出現——也就是說 campaign 本身的資料真的異常（不是常見的「已經被
+    // 處理過」情境，那種情境會被 preflight 攔截成 idempotent-replay／
+    // conflict，看下面對應的分支）。
+    if (decision.outcome === 'invalid-status') {
+      throw new HttpsError(
+        'failed-precondition',
+        '這筆發送目前的狀態不可能還有待人工處理的收件人。',
+      )
+    }
+    if (decision.outcome === 'processing-lease-active') {
+      throw new HttpsError('aborted', '這筆發送目前正在寄送中，請稍後再試一次。')
+    }
+    if (decision.outcome === 'resolution-lease-held') {
+      throw new HttpsError('aborted', '另一位管理員正在處理這筆發送，請稍後再試一次。')
+    }
+    // round 13 新增（Finding 1）：見 acquireCampaignLease 對稱的檢查說明。
+    if (decision.outcome === 'invalid-generation' || decision.outcome === 'generation-exhausted') {
+      logger.error('acquireResolutionLease：campaign.leaseGeneration 異常，拒絕核發租約', {
+        campaignPath: campaignRef.path,
+        outcome: decision.outcome,
+      })
+      throw new HttpsError(
+        'internal',
+        '這筆發送的內部狀態異常，無法安全處理，請聯絡工程人員檢查 Firestore 資料。',
+      )
+    }
+
+    // preflight／最終 transaction 都可能回傳的 outcome。
     if (decision.outcome === 'campaign-not-found') {
       throw new HttpsError('not-found', '找不到這筆發送紀錄。')
+    }
+    if (decision.outcome === 'recipient-not-found') {
+      throw new HttpsError('not-found', '找不到這位收件人。')
     }
     if (decision.outcome === 'resolution-lease-lost') {
       throw new HttpsError(
@@ -2423,16 +2430,24 @@ export const resolveDeliveryUnknown = onCall<{
         '處理過程中租約已經失效，請重新整理頁面再試一次。',
       )
     }
-    if (decision.outcome === 'recipient-not-found') {
-      throw new HttpsError('not-found', '找不到這位收件人。')
+    // round 21 新增（CI Finding 4）：resolutionEvents/{resolutionId} 存在，
+    // 但內容無法通過驗證——fail closed，絕不能當成 idempotent-replay。
+    if (decision.outcome === 'invalid-ledger-event') {
+      logger.error('resolveDeliveryUnknown：resolutionEvents ledger 資料損毀，拒絕處理', {
+        campaignId,
+        recipientId,
+        resolutionId,
+      })
+      throw new HttpsError(
+        'internal',
+        '這筆發送的稽核紀錄資料異常，無法安全處理，請聯絡工程人員檢查 Firestore 資料。',
+      )
     }
     if (decision.outcome === 'invalid-authoritative-totals') {
       logger.error('resolveDeliveryUnknown：authoritative totals 驗證失敗，拒絕寫入', {
         campaignId,
         recipientId,
         action,
-        authoritativeTotals,
-        authoritativeNonTerminalCount,
       })
       throw new HttpsError(
         'internal',

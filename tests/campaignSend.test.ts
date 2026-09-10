@@ -31,6 +31,9 @@ import {
   decideReclaimExpiredDeliveryAttempt,
   decideRecipientClaim,
   decideResolveDeliveryUnknown,
+  decideResolveDeliveryUnknownPreflight,
+  parseResolutionEventRecord,
+  type ResolveDeliveryUnknownPreflightDecision,
   finalizeCampaignWithPressReleaseTx,
   hasExceededMaxAttempts,
   isCampaignLeaseHeldByOther,
@@ -5700,6 +5703,222 @@ describe('decideResolveDeliveryUnknown（round 8 新增、round 9／10 大幅修
       const afterForceRetry = { ...before, failed: before.failed + 1, deliveryUnknown: before.deliveryUnknown - 1 }
       expect(isValidAuthoritativeTotalsShape(afterForceRetry, 1)).toBe(true)
     })
+  })
+
+  // round 21 新增（CI Finding 4）：resolutionEvents/{resolutionId} 讀回時
+  // 不再做未經驗證的 `as` cast——decideResolveDeliveryUnknown 本身也要對
+  // 損毀的 ledger 文件 fail closed，不能誤判成 idempotent-replay。這是
+  // decideResolveDeliveryUnknown 這一層的防線（跟下面
+  // decideResolveDeliveryUnknownPreflight 共用同一個 parseResolutionEventRecord，
+  // 兩處刻意保持行為一致）。
+  it('resolutionEvents/{resolutionId} 存在但欄位損毀（缺 resolutionAction）→ invalid-ledger-event，不當成 idempotent-replay', () => {
+    const decision = decideResolveDeliveryUnknown(
+      snapOf({ status: 'sent' }),
+      campaignWithLease(),
+      snapOf({
+        recipientId: RECIPIENT_ID,
+        // resolutionAction 缺失
+        resolutionReason: '已電話確認記者收到信',
+        resolvedBy: 'admin@x.com',
+        fencingGeneration: GEN,
+        beforeStatus: 'delivery_unknown',
+        afterStatus: 'sent',
+      }),
+      RECIPIENT_ID,
+      totals({ deliveryUnknown: 0 }),
+      1,
+      audit('mark_delivered'),
+      LEASE_ID,
+      GEN,
+      T0,
+    )
+    expect(decision).toEqual({ outcome: 'invalid-ledger-event' })
+  })
+})
+
+describe('parseResolutionEventRecord（round 21 新增，CI Finding 4：resolutionEvents/{resolutionId} 讀回時的唯一驗證入口）', () => {
+  const validEvent = () => ({
+    recipientId: 'r1',
+    resolutionAction: 'mark_delivered' as const,
+    resolutionReason: '已電話確認記者收到信',
+    resolvedBy: 'admin@x.com',
+    fencingGeneration: 3,
+    beforeStatus: 'delivery_unknown' as const,
+    afterStatus: 'sent' as const,
+  })
+
+  it('欄位齊全、型別正確 → 回傳解析後的 ResolutionEventRecord', () => {
+    expect(parseResolutionEventRecord(validEvent())).toEqual(validEvent())
+  })
+
+  it('data 是 undefined → null（fail closed）', () => {
+    expect(parseResolutionEventRecord(undefined)).toBeNull()
+  })
+
+  const malformedCases: [string, Record<string, unknown>][] = [
+    ['recipientId 缺失', { ...validEvent(), recipientId: undefined }],
+    ['recipientId 是空字串', { ...validEvent(), recipientId: '' }],
+    ['resolutionAction 不是合法的 union 值', { ...validEvent(), resolutionAction: 'delete_forever' }],
+    ['resolutionReason 是空字串', { ...validEvent(), resolutionReason: '' }],
+    ['resolvedBy 缺失', { ...validEvent(), resolvedBy: undefined }],
+    ['beforeStatus 不是 delivery_unknown', { ...validEvent(), beforeStatus: 'sent' }],
+    ['afterStatus 不是 sent／failed', { ...validEvent(), afterStatus: 'exhausted' }],
+    ['fencingGeneration 不是整數', { ...validEvent(), fencingGeneration: 1.5 }],
+    ['fencingGeneration 小於 1', { ...validEvent(), fencingGeneration: 0 }],
+    ['fencingGeneration 是字串', { ...validEvent(), fencingGeneration: '3' }],
+  ]
+  it.each(malformedCases)('%s → null（fail closed）', (_label, malformed) => {
+    expect(parseResolutionEventRecord(malformed)).toBeNull()
+  })
+})
+
+describe('decideResolveDeliveryUnknownPreflight（round 21 新增，CI Finding 1：resolveDeliveryUnknown 的 replay／conflict preflight）', () => {
+  const RECIPIENT_ID = 'r1'
+  const audit = (overrides: Partial<ResolveDeliveryUnknownAudit> = {}): ResolveDeliveryUnknownAudit => ({
+    resolvedBy: 'admin@x.com',
+    resolutionId: 'resolution-id-001',
+    resolutionAction: 'mark_delivered',
+    resolutionReason: '已電話確認記者收到信',
+    ...overrides,
+  })
+  const existingEvent = (overrides: Record<string, unknown> = {}) =>
+    snapOf({
+      recipientId: RECIPIENT_ID,
+      resolutionAction: 'mark_delivered',
+      resolutionReason: '已電話確認記者收到信',
+      resolvedBy: 'admin@x.com',
+      fencingGeneration: 3,
+      beforeStatus: 'delivery_unknown',
+      afterStatus: 'sent',
+      ...overrides,
+    })
+  // terminal 或 non-terminal 都無所謂——preflight 刻意不檢查 campaign.status，
+  // 這正是這次修正的重點：不論 campaign 現在是不是 terminal，preflight 都
+  // 必須能讀到 idempotent-replay／conflict，見下面每個測試案例的說明。
+  const terminalCampaign = snapOf({ status: 'completed' })
+
+  it('campaign 文件不存在 → campaign-not-found', () => {
+    const decision = decideResolveDeliveryUnknownPreflight(
+      snapOf({ status: 'sent' }),
+      missing,
+      missing,
+      RECIPIENT_ID,
+      audit(),
+    )
+    expect(decision).toEqual({ outcome: 'campaign-not-found' })
+  })
+
+  it('recipient 文件不存在 → recipient-not-found', () => {
+    const decision = decideResolveDeliveryUnknownPreflight(
+      missing,
+      terminalCampaign,
+      missing,
+      RECIPIENT_ID,
+      audit(),
+    )
+    expect(decision).toEqual({ outcome: 'recipient-not-found' })
+  })
+
+  // 必要測試 1：terminal campaign、同一個 resolutionId＋相同 payload →
+  // idempotent-replay——這正是 CI 失敗 1～3 的核心：即使 campaign 已經是
+  // completed，只要 payload 相符，preflight 必須能讀到 idempotent-replay，
+  // 完全不去看 campaign.status。
+  it('terminal campaign 上，event 已存在且 payload 完全相同 → idempotent-replay', () => {
+    const decision = decideResolveDeliveryUnknownPreflight(
+      snapOf({ status: 'sent' }),
+      terminalCampaign,
+      existingEvent(),
+      RECIPIENT_ID,
+      audit(),
+    )
+    expect(decision).toEqual({
+      outcome: 'idempotent-replay',
+      recipientStatus: 'sent',
+      resolvedBy: 'admin@x.com',
+      resolutionAction: 'mark_delivered',
+      resolutionReason: '已電話確認記者收到信',
+    })
+  })
+
+  // 必要測試 2：terminal campaign、同一個 resolutionId＋不同 payload →
+  // conflict（不是 idempotent-replay）。
+  it('terminal campaign 上，event 已存在但 payload 不同 → conflict', () => {
+    const decision = decideResolveDeliveryUnknownPreflight(
+      snapOf({ status: 'sent' }),
+      terminalCampaign,
+      existingEvent(),
+      RECIPIENT_ID,
+      audit({ resolutionAction: 'force_retry', resolutionReason: '不一樣的理由' }),
+    )
+    expect(decision).toEqual({
+      outcome: 'conflict',
+      recipientStatus: 'sent',
+      resolvedBy: 'admin@x.com',
+      resolutionAction: 'mark_delivered',
+      resolutionReason: '已電話確認記者收到信',
+    })
+  })
+
+  // 必要測試 3：terminal campaign、不同的 resolutionId（event 不存在），
+  // 但 recipient 已經不是 delivery_unknown（被另一個 resolutionId 處理過）
+  // → conflict。
+  it('terminal campaign 上，event 不存在但 recipient 已經不是 delivery_unknown → conflict', () => {
+    const decision = decideResolveDeliveryUnknownPreflight(
+      snapOf({
+        status: 'failed',
+        resolvedBy: 'other-admin@x.com',
+        resolutionAction: 'force_retry',
+        resolutionReason: '別的原因',
+      }),
+      terminalCampaign,
+      missing,
+      RECIPIENT_ID,
+      audit({ resolutionId: 'a-brand-new-id' }),
+    )
+    expect(decision).toEqual({
+      outcome: 'conflict',
+      recipientStatus: 'failed',
+      resolvedBy: 'other-admin@x.com',
+      resolutionAction: 'force_retry',
+      resolutionReason: '別的原因',
+    })
+  })
+
+  // 必要測試 4：損毀的 ledger 文件 → invalid-ledger-event，fail closed，
+  // 絕對不能被當成 idempotent-replay（即使 recipientId 剛好對得上）。
+  it('event 存在但欄位損毀 → invalid-ledger-event，fail closed', () => {
+    const decision = decideResolveDeliveryUnknownPreflight(
+      snapOf({ status: 'sent' }),
+      terminalCampaign,
+      snapOf({ recipientId: RECIPIENT_ID }), // 缺 resolutionAction／resolvedBy 等欄位
+      RECIPIENT_ID,
+      audit(),
+    )
+    expect(decision).toEqual({ outcome: 'invalid-ledger-event' })
+  })
+
+  // event 不存在、recipient 現在確實還是 delivery_unknown → proceed，
+  // 呼叫端這時才應該繼續往下 acquire resolution 租約。
+  it('event 不存在，recipient 現在確實還是 delivery_unknown → proceed', () => {
+    const decision = decideResolveDeliveryUnknownPreflight(
+      snapOf({ status: 'delivery_unknown' }),
+      terminalCampaign,
+      missing,
+      RECIPIENT_ID,
+      audit(),
+    )
+    expect(decision).toEqual({ outcome: 'proceed' })
+  })
+
+  // 'proceed' 只是內部控制流程的訊號——這裡明確記錄它是
+  // ResolveDeliveryUnknownPreflightDecision 的合法成員，但
+  // coordinateResolveDeliveryUnknown（見 shared/campaignSend.ts）保證絕不
+  //會把它原樣回傳給呼叫端：只要 preflight 回傳 'proceed'，一定會接著去
+  // acquire resolution 租約、跑最終 transaction，回傳的一定是那之後的
+  // outcome。
+  it('proceed 是合法的 preflight outcome，僅供 coordinateResolveDeliveryUnknown 內部使用', () => {
+    const decision: ResolveDeliveryUnknownPreflightDecision = { outcome: 'proceed' }
+    expect(decision.outcome).toBe('proceed')
   })
 })
 
