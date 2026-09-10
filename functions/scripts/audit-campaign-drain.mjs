@@ -85,6 +85,7 @@
  *   scripts/audit-scan.mjs 檔案開頭「這個協定『沒有』保證什麼」一節，以及
  *   下方【部署 runbook 補充】。
  */
+import { pathToFileURL } from 'node:url'
 import { isDirectExecution, verifyBuildFreshness, compiledClassifierPath } from './audit-utils.mjs'
 import { runDrainAuditScan, DEFAULT_MAX_SCAN_ATTEMPTS } from './audit-scan.mjs'
 
@@ -117,7 +118,21 @@ async function main() {
     return
   }
 
-  const { classifyCampaignForDrainAudit } = await import(compiledClassifierPath)
+  // Windows 修正：compiledClassifierPath 是原始檔案系統路徑（`C:\...`），
+  // Node 的 ESM 動態載入要求絕對路徑必須是合法的 file 開頭的 URL，否則
+  // 會把 `C:` 誤認成不支援的 URL scheme 而丟出
+  // ERR_UNSUPPORTED_ESM_URL_SCHEME——只有這裡（真的要動態載入的那一刻）需要
+  // 轉成 file URL，verifyBuildFreshness() 等其餘檔案系統操作仍然用原本的
+  // filesystem path，不受影響。pathToFileURL 是 Node 官方 API，正確處理
+  // Windows 磁碟機代號、空白、Unicode、`#`、`%` 等需要跳脫的字元，不要自己
+  // 手刻字串拼接或反斜線取代。
+  //
+  // （這段註解刻意不把「動態載入」跟後面的括號寫在一起、也不用完整的
+  // `scheme://` 寫法──Vite 的 SSR 模組轉換用輕量 lexer 掃描 import 語法，
+  // 曾經觀察到純文字註解裡出現看起來像動態載入呼叫或完整 URL 的字樣時，
+  // 會誤判成真正的語法而讓整個檔案轉譯失敗；這裡只是註解措辭上的迴避，
+  // 不影響下面實際程式碼的行為。）
+  const { classifyCampaignForDrainAudit } = await import(pathToFileURL(compiledClassifierPath).href)
 
   const { initializeApp } = await import('firebase-admin/app')
   const { getFirestore, FieldPath } = await import('firebase-admin/firestore')

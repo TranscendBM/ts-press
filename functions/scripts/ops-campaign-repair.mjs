@@ -66,7 +66,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isDirectExecution, verifyBuildFreshness } from './audit-utils.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -172,7 +172,16 @@ async function main() {
     classifyRecipientForDrainAudit,
     decideCampaignStatus,
     CAMPAIGN_LEASE_MS,
-  } = await import(compiledClassifierPath)
+    // Windows 修正：見 audit-campaign-drain.mjs 對應位置的說明──
+    // compiledClassifierPath 是原始檔案系統路徑，動態載入需要合法的
+    // file URL 才能在 Windows 上正確載入，否則 `C:` 會被誤認成不支援的
+    // URL scheme。只有這裡轉成 file URL，其餘檔案系統操作（verifyBuildFreshness
+    // 等）仍然用原本的 path。（這裡的註解措辭刻意避開「動態載入」加括號的
+    // 寫法與完整 `scheme://` 字串──這支檔案會被 tests/opsCampaignRepair.test.ts
+    // 用 ESM import 匯入，Vite 的 SSR 轉換用輕量 lexer 掃描 import 語法，
+    // 已經實測過純文字註解裡出現看起來像動態載入呼叫或完整 URL 的字樣時，
+    // 會誤判成真正的語法而讓整個檔案轉譯失敗，見本輪報告的說明。）
+  } = await import(pathToFileURL(compiledClassifierPath).href)
 
   const { initializeApp } = await import('firebase-admin/app')
   const { getFirestore, FieldValue, Timestamp } = await import('firebase-admin/firestore')
