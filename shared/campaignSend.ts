@@ -4043,13 +4043,33 @@ export interface CoordinateResolveDeliveryUnknownRefs {
  *    resolveDeliveryUnknownTx transaction——這一步完全不變，仍然會自己重新
  *    驗證 lease／generation／event／recipient（見該函式的說明），preflight
  *    的結果不能、也沒有取代這裡的重新驗證。
+ *
+ * ⚠️ round 23 修正（P2）：`nowMs` 從單一數字改成 `() => number` 的 clock
+ * function。round 21 引入這支協調函式之前，acquire 與最終 transaction
+ * 各自在自己執行的當下呼叫一次 `Date.now()`；round 21 把兩邊改成共用
+ * callable 頂層算好、只算一次的同一個數字，結果最終 transaction（在
+ * `refs.queryAuthoritativeRecipients()`——一次可能耗時、非交易的 Firestore
+ * 查詢——跑完之後才執行）拿到的「現在」永遠等於（甚至早於）acquire 當下的
+ * 時間，structurally 不可能觀察到「query 拖太久、租約在等待期間真的過期」
+ * 這件事：`resolveDeliveryUnknownTx` 裡的租約到期檢查（比較
+ * `resolutionLeaseExpiresAtMs` 與 `nowMs`）永遠是拿一個偏舊、偏早的快照去比
+ * ——查詢真的拖過期限也看不出來。現在改回讓每個 transaction 在自己實際執行
+ * 的那一刻呼叫 `nowMs()`：acquire 的 transaction 呼叫一次，最終
+ * transaction 另外、獨立呼叫一次，兩者之間隔著那段可能很慢的查詢，任何
+ * 真實流逝的時間都會被兩次各自新讀的呼叫如實反映。這是額外一層防護，不是
+ * 取代 leaseGeneration／resolutionGeneration 的 fencing 檢查——generation
+ * fencing 仍然是主要的互斥保證，clock 只是讓「租約已過期」這個判斷本身不再
+ * 結構性地失明。
  */
 export async function coordinateResolveDeliveryUnknown(
   refs: CoordinateResolveDeliveryUnknownRefs,
   recipientId: string,
   audit: ResolveDeliveryUnknownAudit,
   resolutionLeaseAttemptId: string,
-  nowMs: number,
+  /** round 23 修正：注入的 clock，不是預先算好的數字——見上方函式說明。
+   *  呼叫端必須傳一個每次呼叫都重新讀取即時時間的函式（production 是
+   *  `() => Date.now()`），不能傳一個提早算好、閉包住的常數。 */
+  nowMs: () => number,
   leaseMs: number,
   buildLeaseExtra: (decision: AcquireResolutionLeaseDecision) => Record<string, unknown> = () => ({}),
   buildRecipientExtra: (
@@ -4069,7 +4089,7 @@ export async function coordinateResolveDeliveryUnknown(
   if (preflight.outcome !== 'proceed') return preflight
 
   const leaseDecision = await refs.runTransaction((mk) =>
-    acquireResolutionLeaseTx(mk('campaign'), resolutionLeaseAttemptId, nowMs, leaseMs, buildLeaseExtra),
+    acquireResolutionLeaseTx(mk('campaign'), resolutionLeaseAttemptId, nowMs(), leaseMs, buildLeaseExtra),
   )
   if (leaseDecision.outcome === 'invalid-status') {
     // 競態：preflight 讀完之後、acquire 之前，另一個 invocation 已經把
@@ -4095,7 +4115,7 @@ export async function coordinateResolveDeliveryUnknown(
       audit,
       resolutionLeaseAttemptId,
       leaseDecision.generation,
-      nowMs,
+      nowMs(),
       buildRecipientExtra,
       buildCampaignExtra,
       buildEventExtra,

@@ -447,7 +447,11 @@ describe('campaign／recipient 併發競爭（對著真正的 Firestore 驗證 s
       recipientRef.id,
       audit,
       leaseAttemptId,
-      Date.now(),
+      // round 23 修正：coordinateResolveDeliveryUnknown 的 nowMs 現在是
+      // clock function（見該函式上方的說明），不是預先算好的數字——這裡跟
+      // production（functions/src/index.ts）一樣傳 () => Date.now()，不讓
+      // 這個 emulator helper 跟 production 的呼叫方式漂移。
+      () => Date.now(),
       RESOLUTION_LEASE_MS,
       () => ({ updatedAt: serverTimestamp() }),
       () => ({ resolvedAt: serverTimestamp() }),

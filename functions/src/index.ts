@@ -2346,7 +2346,12 @@ export const resolveDeliveryUnknown = onCall<{
       recipientId,
       audit,
       leaseAttemptId,
-      Date.now(),
+      // round 23 修正（P2）：傳 clock function 本身，不能預先呼叫
+      // Date.now() 算成單一數字再傳進去——否則 acquire 與最終 transaction
+      // （中間隔著 refs.queryAuthoritativeRecipients() 這次可能耗時的查詢）
+      // 又會共用同一個偏舊的時間快照，見 coordinateResolveDeliveryUnknown
+      // 上方的完整說明。
+      () => Date.now(),
       RESOLUTION_LEASE_MS,
       // round 10 新增（Finding 2）：對稱於 acquireCampaignLease，acquired
       // 時順手清掉已經證明失效的處理租約殘留欄位。

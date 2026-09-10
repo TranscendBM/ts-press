@@ -32,6 +32,8 @@ import {
   decideRecipientClaim,
   decideResolveDeliveryUnknown,
   decideResolveDeliveryUnknownPreflight,
+  coordinateResolveDeliveryUnknown,
+  type CoordinateResolveDeliveryUnknownRefs,
   parseResolutionEventRecord,
   type ResolveDeliveryUnknownPreflightDecision,
   finalizeCampaignWithPressReleaseTx,
@@ -58,11 +60,13 @@ import {
   readMsCompat,
   reconcileCampaignDelivery,
   type ReconcileCampaignDeliveryDeps,
+  type RecipientStatusForTotals,
   decideReleaseCampaignProcessingLease,
   RECIPIENT_LEASE_MS,
   RECIPIENTS_SETUP_STALE_MS,
   releaseCampaignProcessingLeaseTx,
   repairCampaignPressReleaseSyncTx,
+  RESOLUTION_LEASE_MS,
   resolveCampaignResume,
   type ResolveDeliveryUnknownAudit,
   RESULT_COMMIT_MARGIN_MS,
@@ -5919,6 +5923,245 @@ describe('decideResolveDeliveryUnknownPreflight（round 21 新增，CI Finding 1
   it('proceed 是合法的 preflight outcome，僅供 coordinateResolveDeliveryUnknown 內部使用', () => {
     const decision: ResolveDeliveryUnknownPreflightDecision = { outcome: 'proceed' }
     expect(decision.outcome).toBe('proceed')
+  })
+})
+
+// round 23 修正（P2）：coordinateResolveDeliveryUnknown 的 nowMs 從單一數字
+// 改成 injectable clock () => number——修正前，acquire transaction 與最終
+// resolveDeliveryUnknownTx transaction 共用 callable 頂層算好、只算一次的
+// 同一個時間快照；acquire 與最終 transaction 之間隔著
+// refs.queryAuthoritativeRecipients()（可能耗時、非交易的 Firestore
+// 查詢），這代表最終 transaction 的租約到期檢查永遠是拿一個偏舊、偏早的
+// 時間去比對，query 真的拖過期限也偵測不到。這裡刻意測到
+// coordinateResolveDeliveryUnknown 這一層（不是只測 decideResolveDeliveryUnknown
+// 這個純函式）——因為「acquire 與 final 各自新讀一次時間」是協調函式的
+// wiring 責任，不是純函式的 nowMs 參數本身能證明的事：把同一個
+// nowMs 值傳給 decideResolveDeliveryUnknown 兩次，看不出來呼叫端到底是
+// 傳了同一個快照還是剛好兩次都讀到一樣的時間；只有在協調層用一個會計數、
+// 每次回傳不同值的 fake clock，才能證明 acquire 跟 final 是各自獨立呼叫
+// nowMs()，不是共用同一個閉包住的數字。
+describe('coordinateResolveDeliveryUnknown（round 23 修正 P2：nowMs 從單一數字改成 injectable clock，acquire／final transaction 各自在執行當下重新讀取時間）', () => {
+  const RECIPIENT_ID = 'r1'
+  const LEASE_ATTEMPT_ID = 'lease-attempt-1'
+
+  const audit = (overrides: Partial<ResolveDeliveryUnknownAudit> = {}): ResolveDeliveryUnknownAudit => ({
+    resolvedBy: 'admin@x.com',
+    resolutionId: 'resolution-id-001',
+    resolutionAction: 'mark_delivered',
+    resolutionReason: '已電話確認記者收到信',
+    ...overrides,
+  })
+
+  // preflight 會回傳 proceed、acquire 會成功所需要的最低限度初始狀態：
+  // recipientsReady、狀態合格（needs_review），目前沒有任何人持有租約。
+  const freshCampaign = (overrides: Record<string, unknown> = {}) => ({
+    status: 'needs_review',
+    recipientsReady: true,
+    ...overrides,
+  })
+  const freshRecipient = (overrides: Record<string, unknown> = {}) => ({
+    status: 'delivery_unknown',
+    ...overrides,
+  })
+
+  type Target = 'recipient' | 'campaign' | 'event'
+  type Work = (mk: (target: Target) => DocTx) => Promise<unknown>
+
+  /** 建立 coordinateResolveDeliveryUnknown 需要的 refs：三份 fakeDocTx
+   *  （recipient／campaign／event）＋固定回傳的 authoritative recipients。
+   *  預設 runTransaction 就是單純呼叫一次 work(mk)；`onRunTransaction` 讓
+   *  個別測試可以換掉這個行為，模擬 Firestore 對同一個 transaction
+   *  callback 的內部 retry。 */
+  function makeRefs(params: {
+    campaign: Record<string, unknown> | undefined
+    recipient: Record<string, unknown> | undefined
+    event?: Record<string, unknown> | undefined
+    recipients: RecipientStatusForTotals[]
+    onRunTransaction?: (work: Work, mk: (target: Target) => DocTx, transactionIndex: number) => Promise<unknown>
+  }) {
+    const recipientDoc = fakeDocTx(params.recipient)
+    const campaignDoc = fakeDocTx(params.campaign)
+    const eventDoc = fakeDocTx(params.event)
+    const mk = (target: Target): DocTx =>
+      target === 'recipient' ? recipientDoc : target === 'campaign' ? campaignDoc : eventDoc
+    let transactionIndex = 0
+    // 這裡故意用 `as unknown as CoordinateResolveDeliveryUnknownRefs`：
+    // runTransaction 本身是泛型方法（每次呼叫的 T 由呼叫端決定），但這個
+    // fake 需要接受同一個 `work` 型別給 onRunTransaction 這個測試專用的
+    // hook 使用，兩者對 TypeScript 來說沒辦法在不放寬型別的情況下同時
+    //滿足——實際執行時的行為（讀取、呼叫、回傳）跟真正的 DocTx／refs
+    // 介面完全一致，只是型別層面上放寬檢查。
+    const refs = {
+      runTransaction: (work: Work) => {
+        transactionIndex += 1
+        if (params.onRunTransaction) {
+          return params.onRunTransaction(work, mk, transactionIndex)
+        }
+        return work(mk)
+      },
+      queryAuthoritativeRecipients: async () => params.recipients,
+    } as unknown as CoordinateResolveDeliveryUnknownRefs
+    return { refs, recipientDoc, campaignDoc, eventDoc }
+  }
+
+  // 情境：query 沒有拖太久，final transaction 讀到的時間仍然落在租約到期
+  // 之前 → 正常完成。這是「修正沒有讓正常案例壞掉」的控制組。
+  it('控制組：query 沒有拖太久，final transaction 仍在租約到期前執行 → 正常完成，回傳 resolved', async () => {
+    const nowValues = [T0, T0 + 1_000] // 依序：acquire 讀到的時間、final 讀到的時間
+    let i = 0
+    const clock = vi.fn(() => nowValues[i++])
+
+    const { refs, recipientDoc, eventDoc } = makeRefs({
+      campaign: freshCampaign(),
+      recipient: freshRecipient(),
+      recipients: [{ status: 'delivery_unknown' }],
+    })
+
+    const decision = await coordinateResolveDeliveryUnknown(
+      refs,
+      RECIPIENT_ID,
+      audit(),
+      LEASE_ATTEMPT_ID,
+      clock,
+      RESOLUTION_LEASE_MS,
+    )
+
+    expect(decision.outcome).toBe('resolved')
+    // preflight 不需要時間，只有 acquire、final 各呼叫一次 nowMs()。
+    expect(clock).toHaveBeenCalledTimes(2)
+    expect(recipientDoc.current()?.status).toBe('sent')
+    expect(eventDoc.current()).toBeTruthy()
+  })
+
+  // 核心情境（這次修正要解決的問題）：acquire 在 t0 取得租約，到期時間是
+  // t0+RESOLUTION_LEASE_MS；模擬 refs.queryAuthoritativeRecipients()（真實
+  // 的 authoritative 查詢）拖得夠久，final transaction 執行時，時間已經
+  // 超過租約到期時間 → 必須偵測到租約已過期，回傳 resolution-lease-lost，
+  // 不能誤判成仍然有效。
+  it('acquire 在 t0 取得租約（到期＝t0+LEASE_MS），query 拖到超過到期時間才進 final transaction → resolution-lease-lost，且完全不寫入任何 mutation', async () => {
+    const t0 = T0
+    const nowValues = [t0, t0 + RESOLUTION_LEASE_MS + 1_000] // final 讀到的時間已經超過 t0+LEASE_MS
+    let i = 0
+    const clock = vi.fn(() => nowValues[i++])
+
+    const { refs, recipientDoc, campaignDoc, eventDoc } = makeRefs({
+      campaign: freshCampaign(),
+      recipient: freshRecipient(),
+      recipients: [{ status: 'delivery_unknown' }],
+    })
+
+    const decision = await coordinateResolveDeliveryUnknown(
+      refs,
+      RECIPIENT_ID,
+      audit(),
+      LEASE_ATTEMPT_ID,
+      clock,
+      RESOLUTION_LEASE_MS,
+    )
+
+    expect(decision).toEqual({ outcome: 'resolution-lease-lost' })
+    expect(clock).toHaveBeenCalledTimes(2)
+
+    // 驗證 acquire 那一步本身算出的到期時間確實是 t0+LEASE_MS（不是別的
+    // 值），證明 final 之所以判定過期，是因為時間真的往前走了，不是 acquire
+    // 那一步本身算錯。
+    expect(campaignDoc.current()?.resolutionLeaseExpiresAtMs).toBe(t0 + RESOLUTION_LEASE_MS)
+
+    // 零 mutation：recipient 文件維持原樣（還是 delivery_unknown，沒有
+    // resolvedBy／resolutionId／status 被改掉）、resolutionEvents ledger
+    // 完全沒有被寫入、campaign 的 totals／status 也沒有被 resolveDeliveryUnknownTx
+    // 改動（campaign 文件上唯一的變化來自 acquire 那一步本身核發租約，不是
+    // final transaction 寫入的）。
+    expect(recipientDoc.current()).toEqual(freshRecipient())
+    expect(eventDoc.current()).toBeUndefined()
+    expect(campaignDoc.current()?.status).toBe('needs_review')
+    expect(campaignDoc.current()?.['totals.recipients']).toBeUndefined()
+    expect(campaignDoc.current()?.['totals.sent']).toBeUndefined()
+  })
+
+  // Firestore 樂觀並行控制的內部 retry：同一個 transaction callback 因為
+  // 寫入衝突被重跑，每次重跑都必須重新呼叫 nowMs()，不能把第一次讀到的值
+  // 記在閉包裡繼續用。這裡用一個「讀真實資料、但寫入被丟棄」的唯讀視圖
+  // 代表被放棄的那次嘗試（真實的 Firestore transaction 在提交失敗前，
+  // buffer 的寫入本來就不會真的送到伺服器），只有最後一次呼叫才會真正
+  // 寫入——這樣才能正確模擬「retry 之間，時間確實往前走了」。
+  it('acquire／final transaction 的 callback 各自被 Firestore 重跑一次 → 每次重跑都重新呼叫 nowMs()，不是沿用第一次讀到的值', async () => {
+    const nowValues = [T0, T0 + 10, T0 + 20, T0 + 30]
+    let i = 0
+    const clock = vi.fn(() => nowValues[i++])
+
+    const discard = (doc: DocTx): DocTx => ({
+      get: () => doc.get(),
+      set: () => {},
+      update: () => {},
+    })
+
+    const { refs, recipientDoc, campaignDoc, eventDoc } = makeRefs({
+      campaign: freshCampaign(),
+      recipient: freshRecipient(),
+      recipients: [{ status: 'delivery_unknown' }],
+      onRunTransaction: async (work, mk, transactionIndex) => {
+        // transactionIndex 1 = preflight（唯讀，不需要模擬 retry）；
+        // 2 = acquire、3 = final——這兩個才真的會呼叫 nowMs()，各自模擬
+        // 一次「先跑一次因為衝突被丟棄，再重跑一次真正 commit」。
+        if (transactionIndex === 2 || transactionIndex === 3) {
+          const discardMk = (target: Target) => discard(mk(target))
+          await work(discardMk)
+        }
+        return work(mk)
+      },
+    })
+
+    const decision = await coordinateResolveDeliveryUnknown(
+      refs,
+      RECIPIENT_ID,
+      audit(),
+      LEASE_ATTEMPT_ID,
+      clock,
+      RESOLUTION_LEASE_MS,
+    )
+
+    expect(decision.outcome).toBe('resolved')
+    // acquire 兩次呼叫（丟棄＋真正 commit）+ final 兩次呼叫 = 4 次，且每次
+    // 讀到的值都不同——不是記憶同一個值。
+    expect(clock).toHaveBeenCalledTimes(4)
+    expect(new Set(nowValues).size).toBe(4)
+    // 真正寫入的租約到期時間，來自 acquire「第二次（真正 commit 的那次）」
+    // 讀到的時間（T0+10），不是第一次被丟棄的那次（T0）。
+    expect(campaignDoc.current()?.resolutionLeaseExpiresAtMs).toBe(T0 + 10 + RESOLUTION_LEASE_MS)
+    expect(recipientDoc.current()?.status).toBe('sent')
+    expect(eventDoc.current()).toBeTruthy()
+  })
+
+  // 到期時間必須以 acquisition transaction「自己執行當下」讀到的時間為準，
+  // 不是呼叫端／callable 一開始（甚至比 acquire 更早）就算好的某個快照。
+  // 這裡模擬 acquire transaction 本身執行得比預期晚（例如前面排了其他
+  // transaction、或單純系統忙碌），驗證到期時間確實是根據這個較晚的時間
+  // 算出來的。
+  it('acquisition transaction 執行當下的時間比預期晚 → 到期時間以 acquire 自己讀到的較晚時間為準', async () => {
+    const lateAcquireTime = T0 + 5_000
+    const finalTime = lateAcquireTime + 1_000
+    const nowValues = [lateAcquireTime, finalTime]
+    let i = 0
+    const clock = vi.fn(() => nowValues[i++])
+
+    const { refs, campaignDoc } = makeRefs({
+      campaign: freshCampaign(),
+      recipient: freshRecipient(),
+      recipients: [{ status: 'delivery_unknown' }],
+    })
+
+    const decision = await coordinateResolveDeliveryUnknown(
+      refs,
+      RECIPIENT_ID,
+      audit(),
+      LEASE_ATTEMPT_ID,
+      clock,
+      RESOLUTION_LEASE_MS,
+    )
+
+    expect(decision.outcome).toBe('resolved')
+    expect(campaignDoc.current()?.resolutionLeaseExpiresAtMs).toBe(lateAcquireTime + RESOLUTION_LEASE_MS)
   })
 })
 
