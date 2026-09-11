@@ -5390,3 +5390,313 @@ export function classifyCampaignForDrainAudit(
     classification,
   }
 }
+
+// ---------------------------------------------------------------------------
+// campaign 頂層 status／totals 校正（round 26 新增）
+// ---------------------------------------------------------------------------
+//
+// 背景：一次真實的（唯讀）drain audit 發現一份 production campaign 的
+// `status:'completed'`，但它的 recipients 子集合真實分佈是
+// `sent:113, failed:3`（116 筆）——`failed` 不是終止狀態
+//（countNonTerminalRecipients 不排除它，retryCampaign 理論上還能認領它），
+// 依 decideCampaignStatus() 的正常公式，這份 campaign 權威狀態應該是
+// 'partial'，不是 'completed'。這正是 classifyCampaignForDrainAudit() 會
+// 標成 INDETERMINATE 的「campaignStatus／recipientDistribution 不一致」。
+//
+// ⚠️ 既有的 reconcileCampaignDelivery（`--action reconcile`）無法修這筆資料，
+// 有兩個各自獨立的原因：
+// 1. ops-campaign-repair.mjs 的 runReconcile() 明確拒絕
+//   `classification !== 'UNKNOWN'` 的 --confirm——這份 campaign 是
+//    INDETERMINATE，不是 UNKNOWN，在嘗試取得任何租約之前就會被擋下。
+// 2. 就算沒有這道前置檢查，decideAcquireCampaignLease() 本身也會對
+//   `isTerminalCampaignStatus(status)` 為 true 的 campaign 直接回傳
+//   `{outcome:'terminal'}`——'completed' 是 terminal 狀態，取得處理租約
+//    這一步本身就會被拒絕。
+//
+// 這裡新增的 decideCampaignStatusRepair() 是一個完全獨立、範圍刻意縮得很窄
+// 的修復動作：只校正 campaign 頂層的 status／totals，讓它們跟真實的
+// recipient 分佈一致——不取得任何處理／resolution 租約、不改動任何
+// recipient 文件、不重試、不寄信。這一輪只支援唯一一種 transition：
+// `completed → partial`（目前唯一觀察到的真實落差形狀），刻意不做成
+// 「任何 status 都能修」的通用工具——多做的每一種情境都是還沒被真實資料
+// 驗證過、也還沒被明確要求的假設。
+//
+// 跟 decidePressReleaseSyncRepair／repairCampaignPressReleaseSyncTx 是同一種
+// 分層：decideCampaignStatusRepair() 是純函式（給定 campaign 快照與收件人
+// 分佈，回傳「能不能修、要修成什麼」），repairCampaignStatusTx() 是薄的
+// Firestore transaction 協調層，只負責「讀新鮮資料 → 呼又純函式 → 合格才
+// 寫入」，呼叫端（ops-campaign-repair.mjs／未來的測試）提供跟其他 *Tx
+// 函式一致的 DocTx／callback 介面，不直接依賴任何具體 SDK。
+
+/** 這個修復動作只讀取收件人的 status（不含 email／姓名等 PII），跟
+ *  reconcile／drain audit 讀取收件人分佈時用的欄位遮罩是同一種精神。 */
+export interface CampaignStatusRepairRecipientSample {
+  status: unknown
+}
+
+/**
+ * 每一種結果都對應到 eligibility 清單裡明確的一項，呼叫端可以直接依
+ * `outcome` 判斷該印出哪一種訊息，不需要另外解析 `reason` 字串。
+ *
+ * - 'already-consistent'：status 已經跟真實分佈算出來的權威狀態相同——
+ *   冪等的核心：重複執行 dry-run／confirm 都必須落在這裡，不能被誤判成
+ *   還有東西可以修。
+ * - 'eligible'：全部檢查通過，`patch` 帶著實際要寫入的欄位。
+ * - 其餘每一種都是明確、各自獨立的擋下原因（fail closed），不是單一個
+ *   籠統的「不合格」。
+ */
+export type CampaignStatusRepairOutcome =
+  | 'campaign-not-found'
+  | 'not-ready'
+  | 'invalid-status'
+  | 'active-processing-lease'
+  | 'active-resolution-lease'
+  | 'has-setup-owner'
+  | 'invalid-lease-generation'
+  | 'invalid-recipient-status'
+  | 'non-terminal-recipient-present'
+  | 'not-terminal-status'
+  | 'unsupported-current-status'
+  | 'unsupported-target-status'
+  | 'no-failed-recipients'
+  | 'already-consistent'
+  | 'eligible'
+
+export interface CampaignStatusRepairDecision {
+  outcome: CampaignStatusRepairOutcome
+  /** 人類可讀、可以直接印給維運人員看的具體原因——即使是 dry-run，也絕不
+   *  印出「加 --confirm 就會執行」這種暗示會成功的籠統訊息（見本輪報告
+   *  Part 1 的說明：那正是 reconcile 過去的問題）。 */
+  reason: string
+  currentStatus?: string
+  /** campaign 文件裡目前的 totals 欄位（未經驗證，只是原樣回顯，方便
+   *  dry-run 輸出跟 authoritativeTotals 並排比較）。 */
+  currentTotals?: Record<string, unknown>
+  authoritativeStatus?: CampaignStatus
+  authoritativeTotals?: CampaignTotalsForFinalize
+  nonTerminalCount?: number
+  /** 只有 `outcome==='eligible'` 才會有值——`--confirm` 實際上會寫入的
+   *  欄位，用跟 decideFinalizeCampaign() 一致的 dot-path 寫法
+   *  （'totals.sent' 等），呼叫端合併自己 SDK 的 updatedAt／completedAt
+   *  刪除欄位後直接 update()。 */
+  patch?: Record<string, unknown>
+}
+
+/** 這個修復動作只允許存在 sent／failed／exhausted 這三種完全終止的收件人
+ *  狀態——queued／claimed／sending 代表還在處理中，delivery_unknown 需要
+ *  獨立的人工 resolution 流程，任何一種出現都代表這不是「單純的 status／
+ *  totals 跟真實分佈脫鉤」，而是還有事情正在發生，必須 fail closed。 */
+const STATUS_REPAIR_FORBIDDEN_RECIPIENT_STATUSES: ReadonlySet<string> = new Set([
+  'queued',
+  'claimed',
+  'sending',
+  'delivery_unknown',
+])
+
+export function decideCampaignStatusRepair(
+  campaignSnap: DocSnapshotLike,
+  recipients: CampaignStatusRepairRecipientSample[],
+): CampaignStatusRepairDecision {
+  if (!campaignSnap.exists || !campaignSnap.data) {
+    return { outcome: 'campaign-not-found', reason: 'campaign 文件不存在，沒有東西可以修復。' }
+  }
+  const data = campaignSnap.data
+
+  if (data.recipientsReady !== true) {
+    return {
+      outcome: 'not-ready',
+      reason: 'recipientsReady 不是 true——收件人清單可能還在建立階段，不可修復。',
+    }
+  }
+
+  if (!isKnownCampaignStatus(data.status)) {
+    return {
+      outcome: 'invalid-status',
+      reason: `campaign.status（${JSON.stringify(data.status)}）不是已知合法的狀態值，無法安全判斷該怎麼修復。`,
+    }
+  }
+  const currentStatus: KnownCampaignStatus = data.status
+
+  // round 26：owner／租約欄位的存在性一律透過 parseLeaseOwner() 判斷——
+  // 跟 classifyCampaignForDrainAudit() 用同一份 parser，格式錯誤（存在但
+  // 不是合法非空字串）一律視為「不能證明是 absent」，fail closed。
+  if (parseLeaseOwner(data.activeAttemptId) !== 'absent') {
+    return {
+      outcome: 'active-processing-lease',
+      reason: 'activeAttemptId 存在——可能仍有處理程序持有處理租約，不可修復。',
+      currentStatus,
+    }
+  }
+  if (parseLeaseOwner(data.resolutionLeaseAttemptId) !== 'absent') {
+    return {
+      outcome: 'active-resolution-lease',
+      reason: 'resolutionLeaseAttemptId 存在——可能有人工 resolution 正在進行，不可修復。',
+      currentStatus,
+    }
+  }
+  if (parseLeaseOwner(data.createdByAttemptId) !== 'absent') {
+    return {
+      outcome: 'has-setup-owner',
+      reason: 'createdByAttemptId 存在——campaign 可能仍處於建立收件人清單階段，不可修復。',
+      currentStatus,
+    }
+  }
+
+  if (readLeaseGeneration(data.leaseGeneration) === null) {
+    return {
+      outcome: 'invalid-lease-generation',
+      reason: 'leaseGeneration 不是合法的非負 safe integer，資料可能已經損毀，不可修復——這個修復動作' +
+        '絕不寫入這個欄位，但要求它本身必須是合法值才能確定資料沒有損毀。',
+      currentStatus,
+    }
+  }
+
+  for (const r of recipients) {
+    if (!isKnownRecipientStatus(r.status)) {
+      return {
+        outcome: 'invalid-recipient-status',
+        reason: `發現至少一位收件人的狀態（${JSON.stringify(r.status)}）無法辨識——fail closed，不可修復。`,
+        currentStatus,
+      }
+    }
+  }
+  if (recipients.some((r) => STATUS_REPAIR_FORBIDDEN_RECIPIENT_STATUSES.has(r.status as string))) {
+    return {
+      outcome: 'non-terminal-recipient-present',
+      reason:
+        '收件人分佈中存在 queued／claimed／sending／delivery_unknown——這些人可能仍在處理中，或需要獨立的' +
+        '人工 resolution 流程，不是這個修復動作能安全處理的情境。',
+      currentStatus,
+    }
+  }
+
+  const known: RecipientStatusForTotals[] = recipients.map((r) => ({ status: r.status as RecipientStatus }))
+  const { totals: authoritativeTotals, nonTerminalCount } = computeAuthoritativeRecipientTotals(known)
+  const authoritativeStatus = decideCampaignStatus(authoritativeTotals, nonTerminalCount)
+  const currentTotals = (data.totals ?? {}) as Record<string, unknown>
+  const totalsMatch =
+    currentTotals.recipients === authoritativeTotals.recipients &&
+    currentTotals.sent === authoritativeTotals.sent &&
+    currentTotals.failed === authoritativeTotals.failed &&
+    currentTotals.exhausted === authoritativeTotals.exhausted &&
+    currentTotals.deliveryUnknown === authoritativeTotals.deliveryUnknown
+
+  // round 26 設計取捨（見本輪報告的說明）：這個「已一致」檢查刻意排在
+  // terminal-status 檢查之前——修復成功之後 campaign.status 會變成
+  // 'partial'（不是 terminal！），冪等性要求「repair 之後再 dry-run 一次」
+  // 必須回報 already-consistent，而不是被 terminal-status 檢查擋下變成
+  // 「blocked」。這裡的判斷順序才能讓兩份需求同時成立。
+  if (currentStatus === authoritativeStatus) {
+    return {
+      outcome: 'already-consistent',
+      reason: totalsMatch
+        ? '目前的 status 與 totals 已經跟真實收件人分佈一致，沒有東西需要修復。'
+        : 'status 已經跟真實分佈一致，但 totals 欄位本身跟真實分佈不完全相符——這不是本輪 repair-status ' +
+          '支援的修復範圍（只處理 completed→partial 的 status 落差），需要人工檢查。',
+      currentStatus,
+      currentTotals,
+      authoritativeStatus,
+      authoritativeTotals,
+      nonTerminalCount,
+    }
+  }
+
+  if (!isTerminalCampaignStatus(currentStatus)) {
+    return {
+      outcome: 'not-terminal-status',
+      reason: `目前的 status（${currentStatus}）不是 terminal 狀態——這個修復動作只處理已經蓋棺論定、卻跟真實分佈不一致的 campaign。`,
+      currentStatus,
+      currentTotals,
+      authoritativeStatus,
+      authoritativeTotals,
+      nonTerminalCount,
+    }
+  }
+  if (currentStatus !== 'completed') {
+    return {
+      outcome: 'unsupported-current-status',
+      reason: `目前的 status（${currentStatus}）不是 'completed'——這一輪 repair-status 只支援 completed → partial 這一種 transition。`,
+      currentStatus,
+      currentTotals,
+      authoritativeStatus,
+      authoritativeTotals,
+      nonTerminalCount,
+    }
+  }
+  if (authoritativeStatus !== 'partial') {
+    return {
+      outcome: 'unsupported-target-status',
+      reason: `真實分佈重新計算出的權威狀態是 '${authoritativeStatus}'，不是 'partial'——這一輪 repair-status 只支援 completed → partial 這一種 transition。`,
+      currentStatus,
+      currentTotals,
+      authoritativeStatus,
+      authoritativeTotals,
+      nonTerminalCount,
+    }
+  }
+  // 跟上面 authoritativeStatus!=='partial' 的檢查角度不同、刻意保留的第二道
+  // 防線（見本輪需求說明）：只要 authoritativeStatus 真的是 'partial'，
+  // 依 decideCampaignStatus() 的公式，failed>0 在數學上已經是必要條件
+  //（禁止 queued／claimed／sending／delivery_unknown 之後，nonTerminalCount
+  // 只可能來自 failed），這裡仍然明確檢查一次，避免上面任何一步的邏輯
+  // 出錯時被另一步意外遮蓋。
+  if (!(authoritativeTotals.failed > 0)) {
+    return {
+      outcome: 'no-failed-recipients',
+      reason: 'authoritative totals 裡 failed 不是正數——這個修復動作只處理「completed 但實際上存在 failed 收件人」這種落差。',
+      currentStatus,
+      currentTotals,
+      authoritativeStatus,
+      authoritativeTotals,
+      nonTerminalCount,
+    }
+  }
+
+  return {
+    outcome: 'eligible',
+    reason: 'campaign.status 與真實收件人分佈不一致（completed → partial 的落差），可以安全修復。',
+    currentStatus,
+    currentTotals,
+    authoritativeStatus,
+    authoritativeTotals,
+    nonTerminalCount,
+    patch: {
+      status: authoritativeStatus,
+      'totals.recipients': authoritativeTotals.recipients,
+      'totals.sent': authoritativeTotals.sent,
+      'totals.failed': authoritativeTotals.failed,
+      'totals.exhausted': authoritativeTotals.exhausted,
+      'totals.deliveryUnknown': authoritativeTotals.deliveryUnknown,
+    },
+  }
+}
+
+/**
+ * Firestore transaction 協調層——跟 repairCampaignPressReleaseSyncTx 同一種
+ * 分層方式：
+ * 1. 在同一個 transaction 內重新讀一次 campaign 文件（不信任 dry-run 當下
+ *    的舊快照）。
+ * 2. 呼叫 `queryAuthoritativeRecipients()`（呼叫端負責在同一個 transaction
+ *    內只查詢 status 欄位，不讀 email／姓名等 PII，見
+ *    ops-campaign-repair.mjs 的接線）。
+ * 3. 呼叫 decideCampaignStatusRepair() 重新跑一次「全部」eligibility 檢查
+ *    ——不重用呼叫端可能持有的任何舊決策，Firestore transaction 因為
+ *    optimistic concurrency 重試時，這個函式本身會整個重新呼叫，天生保證
+ *    每次重試都是從頭重新驗證。
+ * 4. 只有 `outcome==='eligible'` 才會呼叫 `campaignDoc.update()`——`extraFields`
+ *    由呼叫端提供，用來合併自己 SDK 的 `updatedAt`／`completedAt` 刪除欄位，
+ *    這一層完全不知道底下接的是哪個 SDK。
+ */
+export async function repairCampaignStatusTx(
+  campaignDoc: DocTx,
+  queryAuthoritativeRecipients: () => Promise<CampaignStatusRepairRecipientSample[]>,
+  extraFields: (decision: CampaignStatusRepairDecision) => Record<string, unknown>,
+): Promise<CampaignStatusRepairDecision> {
+  const campaignSnap = await campaignDoc.get()
+  const recipients = await queryAuthoritativeRecipients()
+  const decision = decideCampaignStatusRepair(campaignSnap, recipients)
+  if (decision.outcome === 'eligible' && decision.patch) {
+    campaignDoc.update({ ...decision.patch, ...extraFields(decision) })
+  }
+  return decision
+}

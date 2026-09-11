@@ -25,7 +25,13 @@
 import { deleteApp, initializeApp } from 'firebase-admin/app'
 import { getFirestore } from 'firebase-admin/firestore'
 
-export { FieldPath } from 'firebase-admin/firestore'
+// round 26 新增：FieldValue／Timestamp 跟 FieldPath 一樣，都是測試需要組出
+// 跟 production 相同的寫入內容（serverTimestamp()／delete()／
+// Timestamp.fromMillis()）時才需要的 Admin SDK 匯出——原因跟上面說明
+// FieldPath 時完全一樣：只有從這個檔案（實體放在 functions/scripts/ 底下）
+// re-export，root 的 tests/*.test.ts 才能正確解析到
+// functions/node_modules/firebase-admin，不必另外裝一份可能版本不同的複本。
+export { FieldPath, FieldValue, Timestamp } from 'firebase-admin/firestore'
 
 let appCounter = 0
 

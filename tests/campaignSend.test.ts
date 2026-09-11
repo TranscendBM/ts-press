@@ -21,6 +21,8 @@ import {
   decideBeginDeliveryAttempt,
   decideCampaignResume,
   decideCampaignStatus,
+  decideCampaignStatusRepair,
+  repairCampaignStatusTx,
   decideCommitRecipientResult,
   type DeliveryUnknownResolutionAction,
   decideFinalizeCampaign,
@@ -8503,5 +8505,228 @@ describe('classifyCampaignForDrainAudit（round 14 新增，Finding 3：跟部�
         expect(result.classification).not.toBe('SAFE')
       },
     )
+  })
+})
+
+describe('decideCampaignStatusRepair（round 26 新增：--action repair-status 的純決策邏輯——只校正 campaign 頂層 status／totals 跟真實收件人分佈之間的落差，這一輪只支援 completed → partial 這一種 transition，不碰任何 recipient 文件、不重試、不寄信）', () => {
+  /** 一份「乾淨」的、predisposed-eligible 的 completed campaign——單一測試
+   *  只覆寫想驗證的那個欄位，其餘全部維持「本來應該會通過」的樣子，這樣
+   *  才能確定每個 reject 案例真的是被那一項檢查擋下，不是被其他無關的
+   *  欄位意外擋下。 */
+  const eligibleCampaign = (overrides: Record<string, unknown> = {}) =>
+    snapOf({
+      status: 'completed',
+      recipientsReady: true,
+      leaseGeneration: 7,
+      totals: { recipients: 116, sent: 116, failed: 0, exhausted: 0, deliveryUnknown: 0 },
+      ...overrides,
+    })
+
+  /** 真實案例的形狀：113 sent + 3 failed（116 筆）。 */
+  const REAL_CASE_RECIPIENTS = [
+    ...Array.from({ length: 113 }, () => ({ status: 'sent' })),
+    ...Array.from({ length: 3 }, () => ({ status: 'failed' })),
+  ]
+
+  it('completed + 真實分佈 sent:113／failed:3 → eligible，target 是 partial，patch 內容跟權威 totals 完全一致', () => {
+    const decision = decideCampaignStatusRepair(eligibleCampaign(), REAL_CASE_RECIPIENTS)
+    expect(decision.outcome).toBe('eligible')
+    expect(decision.currentStatus).toBe('completed')
+    expect(decision.authoritativeStatus).toBe('partial')
+    expect(decision.authoritativeTotals).toEqual({
+      recipients: 116,
+      sent: 113,
+      failed: 3,
+      exhausted: 0,
+      deliveryUnknown: 0,
+    })
+    expect(decision.nonTerminalCount).toBe(3)
+    expect(decision.patch).toEqual({
+      status: 'partial',
+      'totals.recipients': 116,
+      'totals.sent': 113,
+      'totals.failed': 3,
+      'totals.exhausted': 0,
+      'totals.deliveryUnknown': 0,
+    })
+  })
+
+  it('campaign 不存在 → campaign-not-found', () => {
+    expect(decideCampaignStatusRepair(missing, REAL_CASE_RECIPIENTS).outcome).toBe('campaign-not-found')
+  })
+
+  it('recipientsReady 缺失 → not-ready', () => {
+    const decision = decideCampaignStatusRepair(eligibleCampaign({ recipientsReady: undefined }), REAL_CASE_RECIPIENTS)
+    expect(decision.outcome).toBe('not-ready')
+  })
+
+  it('recipientsReady 是 false → not-ready', () => {
+    const decision = decideCampaignStatusRepair(eligibleCampaign({ recipientsReady: false }), REAL_CASE_RECIPIENTS)
+    expect(decision.outcome).toBe('not-ready')
+  })
+
+  it('有 active processing lease（activeAttemptId 存在）→ active-processing-lease，明確的原因，不是籠統的「不合格」', () => {
+    const decision = decideCampaignStatusRepair(
+      eligibleCampaign({ activeAttemptId: 'attempt-in-flight' }),
+      REAL_CASE_RECIPIENTS,
+    )
+    expect(decision.outcome).toBe('active-processing-lease')
+    expect(decision.reason).toMatch(/activeAttemptId/)
+  })
+
+  it('有 active resolution lease（resolutionLeaseAttemptId 存在）→ active-resolution-lease', () => {
+    const decision = decideCampaignStatusRepair(
+      eligibleCampaign({ resolutionLeaseAttemptId: 'resolver-1' }),
+      REAL_CASE_RECIPIENTS,
+    )
+    expect(decision.outcome).toBe('active-resolution-lease')
+    expect(decision.reason).toMatch(/resolutionLeaseAttemptId/)
+  })
+
+  it('有 setup owner（createdByAttemptId 存在）→ has-setup-owner', () => {
+    const decision = decideCampaignStatusRepair(
+      eligibleCampaign({ createdByAttemptId: 'setup-owner-1' }),
+      REAL_CASE_RECIPIENTS,
+    )
+    expect(decision.outcome).toBe('has-setup-owner')
+    expect(decision.reason).toMatch(/createdByAttemptId/)
+  })
+
+  it.each(['queued', 'claimed', 'sending', 'delivery_unknown'] as const)(
+    '收件人分佈中存在 %s（非完全終止狀態）→ non-terminal-recipient-present，即使其餘收件人分佈看起來完全正常',
+    (forbiddenStatus) => {
+      const decision = decideCampaignStatusRepair(eligibleCampaign(), [...REAL_CASE_RECIPIENTS, { status: forbiddenStatus }])
+      expect(decision.outcome).toBe('non-terminal-recipient-present')
+    },
+  )
+
+  it('任何一位收件人的狀態是無法辨識的畸形值 → invalid-recipient-status，fail closed，不會被忽略', () => {
+    const decision = decideCampaignStatusRepair(eligibleCampaign(), [
+      ...REAL_CASE_RECIPIENTS,
+      { status: 'not-a-real-status' },
+    ])
+    expect(decision.outcome).toBe('invalid-recipient-status')
+  })
+
+  // round 26：leaseGeneration 缺失（undefined）本身是合法的 baseline
+  // （readLeaseGeneration(undefined)===0，跟 decideAcquireCampaignLease 等
+  // 既有函式一致的慣例），不是畸形值——這裡只列出真正不合法的值。
+  it.each([[null], [''], [-1], [1.5], ['not-a-number'], [Number.MAX_SAFE_INTEGER + 10]] as const)(
+    'leaseGeneration 是畸形值（%p）→ invalid-lease-generation，不論其餘欄位是否正常',
+    (badGeneration) => {
+      const decision = decideCampaignStatusRepair(eligibleCampaign({ leaseGeneration: badGeneration }), REAL_CASE_RECIPIENTS)
+      expect(decision.outcome).toBe('invalid-lease-generation')
+    },
+  )
+
+  it('已經是 partial，且 totals 已經跟真實分佈一致 → already-consistent（不是 eligible），這是修復成功後再次 dry-run 必須落在的結果，冪等性的核心', () => {
+    const decision = decideCampaignStatusRepair(
+      eligibleCampaign({
+        status: 'partial',
+        totals: { recipients: 116, sent: 113, failed: 3, exhausted: 0, deliveryUnknown: 0 },
+      }),
+      REAL_CASE_RECIPIENTS,
+    )
+    expect(decision.outcome).toBe('already-consistent')
+    expect(decision.patch).toBeUndefined()
+  })
+
+  it('已經是 completed，且真實分佈也確實全部送達（totals 一致）→ already-consistent（狀態原本就正確，沒有落差可修）', () => {
+    const allSent = Array.from({ length: 10 }, () => ({ status: 'sent' }))
+    const decision = decideCampaignStatusRepair(
+      eligibleCampaign({ totals: { recipients: 10, sent: 10, failed: 0, exhausted: 0, deliveryUnknown: 0 } }),
+      allSent,
+    )
+    expect(decision.outcome).toBe('already-consistent')
+  })
+
+  it('target 權威狀態不是 partial（例如全部 exhausted，權威狀態變成 failed）→ 拒絕，這一輪只支援 completed → partial', () => {
+    const allExhausted = Array.from({ length: 5 }, () => ({ status: 'exhausted' }))
+    const decision = decideCampaignStatusRepair(eligibleCampaign(), allExhausted)
+    expect(decision.authoritativeStatus).toBe('failed')
+    expect(decision.outcome).toBe('unsupported-target-status')
+  })
+
+  it.each(['sending', 'failed', 'needs_review'] as const)(
+    '目前的 status 是 %s（不是 completed），即使真實分佈重新計算出來會是 partial，也拒絕——這一輪的範圍明確是 completed → partial，不是任意 status 都能修',
+    (currentStatus) => {
+      const decision = decideCampaignStatusRepair(eligibleCampaign({ status: currentStatus }), REAL_CASE_RECIPIENTS)
+      expect(decision.outcome).not.toBe('eligible')
+      expect(decision.outcome).not.toBe('already-consistent')
+      expect(decision.authoritativeStatus).toBe('partial')
+    },
+  )
+
+  it('failed 剛好是 0（防禦性檢查：即使前面每一項都通過，target 也不會是 partial，這裡只是確認獨立防線本身邏輯正確）', () => {
+    // 這個情境在目前的檢查順序下，會先被 unsupported-target-status 擋下
+    // （target 不是 partial），no-failed-recipients 是同一個底層事實
+    // 的第二道防線，兩者在正常情況下永遠同時成立，見程式碼裡的說明。
+    const allSentNoFailed = Array.from({ length: 20 }, () => ({ status: 'sent' }))
+    const decision = decideCampaignStatusRepair(
+      eligibleCampaign({ status: 'completed', totals: { recipients: 20, sent: 20, failed: 0, exhausted: 0, deliveryUnknown: 0 } }),
+      allSentNoFailed,
+    )
+    // sent===20, recipients===20，跟真實分佈一致 → already-consistent，
+    // 不是 reject——這確認「completed 且真的全部送達」不會被誤判成需要修復。
+    expect(decision.outcome).toBe('already-consistent')
+  })
+})
+
+describe('repairCampaignStatusTx（round 26 新增：Firestore transaction 協調層——重新讀新鮮資料、重新跑一次全部 eligibility 檢查，只有仍然合格才寫入）', () => {
+  const REAL_CASE_RECIPIENTS = [
+    ...Array.from({ length: 113 }, () => ({ status: 'sent' })),
+    ...Array.from({ length: 3 }, () => ({ status: 'failed' })),
+  ]
+  const extraFields = () => ({ updatedAt: 'server-timestamp', completedAt: 'deleted' })
+
+  it('eligible → 真的呼叫 update()，patch 與 extraFields 都合併寫入，且完全沒有動過 recipients（這支協調層本來就不接觸 recipient 文件）', async () => {
+    const campaignDoc = fakeDocTx({
+      status: 'completed',
+      recipientsReady: true,
+      leaseGeneration: 7,
+      totals: { recipients: 116, sent: 116, failed: 0, exhausted: 0, deliveryUnknown: 0 },
+    })
+    const decision = await repairCampaignStatusTx(campaignDoc, async () => REAL_CASE_RECIPIENTS, extraFields)
+    expect(decision.outcome).toBe('eligible')
+    expect(campaignDoc.updates.length).toBe(1)
+    expect(campaignDoc.current()).toMatchObject({
+      status: 'partial',
+      'totals.sent': 113,
+      'totals.failed': 3,
+      updatedAt: 'server-timestamp',
+      completedAt: 'deleted',
+    })
+  })
+
+  it('already-consistent（重新讀取後發現已經修過）→ 不呼叫 update()，安全 no-op，可以放心重複呼叫 --confirm', async () => {
+    const campaignDoc = fakeDocTx({
+      status: 'partial',
+      recipientsReady: true,
+      leaseGeneration: 7,
+      totals: { recipients: 116, sent: 113, failed: 3, exhausted: 0, deliveryUnknown: 0 },
+    })
+    const decision = await repairCampaignStatusTx(campaignDoc, async () => REAL_CASE_RECIPIENTS, extraFields)
+    expect(decision.outcome).toBe('already-consistent')
+    expect(campaignDoc.updates.length).toBe(0)
+  })
+
+  it('重新讀取時發現不再合格（例如租約在 dry-run 之後被取得）→ fail closed，不呼叫 update()', async () => {
+    const campaignDoc = fakeDocTx({
+      status: 'completed',
+      recipientsReady: true,
+      leaseGeneration: 7,
+      activeAttemptId: 'someone-else-took-it',
+      totals: { recipients: 116, sent: 116, failed: 0, exhausted: 0, deliveryUnknown: 0 },
+    })
+    const decision = await repairCampaignStatusTx(campaignDoc, async () => REAL_CASE_RECIPIENTS, extraFields)
+    expect(decision.outcome).toBe('active-processing-lease')
+    expect(campaignDoc.updates.length).toBe(0)
+  })
+
+  it('campaign 不存在 → campaign-not-found，不呼叫 update()', async () => {
+    const campaignDoc = fakeDocTx(undefined)
+    const decision = await repairCampaignStatusTx(campaignDoc, async () => REAL_CASE_RECIPIENTS, extraFields)
+    expect(decision.outcome).toBe('campaign-not-found')
+    expect(campaignDoc.updates.length).toBe(0)
   })
 })

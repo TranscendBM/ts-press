@@ -23,6 +23,10 @@ export default defineConfig({
       // functions/scripts/emulator-test-support.mjs 的說明），必須跟其他
       // 這裡的檔案一樣透過 `npm run test:rules` 執行。
       'tests/campaignFieldMaskEmulator.test.ts',
+      // round 26 新增：--action repair-status（decideCampaignStatusRepair／
+      // repairCampaignStatusTx）的真實 Firestore transaction 整合測試，
+      // 同樣需要 firebase-admin，同樣的理由必須透過 `npm run test:rules` 執行。
+      'tests/campaignStatusRepairEmulator.test.ts',
     ],
     // 這幾個檔案各自對本機模擬器呼叫 initializeTestEnvironment() 部署自己
     // 的一套 Storage 規則。Storage 模擬器（不像 Firestore）在多個測試檔
@@ -30,5 +34,12 @@ export default defineConfig({
     // 導致本來該過的案例出現 storage/unauthorized。強制檔案之間循序執行
     // 可以避開這個模擬器本身的競態，不影響測試內容的正確性。
     fileParallelism: false,
+    server: {
+      deps: {
+        // round 26：跟 vitest.config.ts 同一個理由與同一份設定，實測必要——
+        // 見該檔案裡這個設定完整的說明。
+        external: [/functions[\\/]scripts[\\/]/],
+      },
+    },
   },
 })

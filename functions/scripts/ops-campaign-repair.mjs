@@ -54,7 +54,19 @@
  * 會先自動 npm run build 再執行，不需要自己記得先手動 build）：
  *   cd functions && npm run ops:campaign-repair -- --project <id> --campaign <id> \
  *     --action reconcile                     # 或 --action repair-press-release
+ *                                             # 或 --action repair-status
  *     [--confirm <同一個 campaign-id>]        # 不加這個旗標只會 dry-run，不寫入
+ *
+ * round 26 新增：--action repair-status——跟 reconcile／repair-press-release
+ * 是完全獨立的第三種動作，範圍刻意縮得很窄：只校正 campaign 頂層的
+ * status／totals，讓它們跟 recipients 子集合真實的分佈一致（目前唯一支援
+ * completed → partial 這一種 transition——見 shared/campaignSend.ts 的
+ * decideCampaignStatusRepair() 完整說明）。不取得任何處理／resolution
+ * 租約、不改動任何 recipient 文件、不重試、不寄信。這是為了修一筆真實
+ * 稽核發現的資料：campaign 是 completed，但 recipients 真實分佈是
+ * sent:113／failed:3——reconcile 用不上（見下面 runReconcile() 的說明：
+ * INDETERMINATE 不是 UNKNOWN，而且 completed 本身就是 terminal，
+ * decideAcquireCampaignLease() 會直接拒絕核發租約）。
  *
  * exit code：
  *   0 — 執行成功（dry-run 或真的 confirm 寫入都算），詳見輸出內容。
@@ -95,6 +107,55 @@ export const CAMPAIGN_REPAIR_CLASSIFICATION_FIELDS = [
   'isTest',
   'mode',
 ]
+
+/** round 26 新增：--action repair-status 的 dry-run／confirm 都用這份
+ *  field mask 讀 campaign 頂層欄位——只包含 decideCampaignStatusRepair()
+ *  的 eligibility 檢查與 dry-run 輸出實際需要的欄位，不含
+ *  email／subject／pressReleaseId 等這個動作用不到的內容（這個動作結構上
+ *  不碰 pressReleases，也不需要判斷 sendKind）。`totals` 選整個巢狀欄位
+ *  （Firestore field mask 對巢狀 map 欄位一次選整個 map）。 */
+export const CAMPAIGN_STATUS_REPAIR_FIELDS = [
+  'status',
+  'recipientsReady',
+  'activeAttemptId',
+  'resolutionLeaseAttemptId',
+  'createdByAttemptId',
+  'leaseGeneration',
+  'totals',
+]
+
+/**
+ * round 26 新增：跟 createClassificationLoader() 同一種理由抽出來的工廠
+ * 函式——輸入這份 campaign 的 DocumentReference，以及 FieldPath／
+ * decideCampaignStatusRepair（呼叫端提供，production 從動態載入的編譯產物
+ * 拿，emulator 整合測試可以直接從 shared/campaignSend.ts 拿同一份純函式），
+ * 回傳一個 `loadCampaignStatusRepairDecision()` 函式：用跟 --confirm 完全
+ * 相同的 field mask 讀 campaign（不含這個動作用不到的欄位），只選收件人的
+ * status（不含 email／姓名等 PII），呼叫 decideCampaignStatusRepair()。
+ * main() 的 runRepairStatus() 呼叫這個工廠函式取得 dry-run 用的
+ * loader，不再自己內聯定義——這樣 emulator 整合測試才能呼叫「跟
+ * production 100% 相同」的 dry-run 讀取路徑。
+ *
+ * @param {FirebaseFirestore.DocumentReference} campaignRef
+ * @param {{FieldPath: {documentId(): FirebaseFirestore.FieldPath}, decideCampaignStatusRepair: Function}} deps
+ */
+export function createCampaignStatusRepairLoader(campaignRef, { FieldPath, decideCampaignStatusRepair }) {
+  const campaignId = campaignRef.id
+  return async function loadCampaignStatusRepairDecision() {
+    const snap = await getDocumentByIdWithFieldMask(
+      campaignRef.parent,
+      campaignId,
+      CAMPAIGN_STATUS_REPAIR_FIELDS,
+      FieldPath,
+    )
+    const campaignSnapLike = snap ? { exists: true, data: snap.data() } : { exists: false, data: undefined }
+    // 只選 status——不讀 email／姓名等 PII，跟 reconcile 的
+    // listAllRecipientStatuses 用同一個欄位遮罩習慣。
+    const recipientsSnap = await campaignRef.collection('recipients').select('status').get()
+    const recipients = recipientsSnap.docs.map((d) => ({ status: d.data().status }))
+    return decideCampaignStatusRepair(campaignSnapLike, recipients)
+  }
+}
 
 /**
  * round 25 新增：把 main() 原本內聯的 loadClassification() 抽成模組頂層
@@ -218,8 +279,8 @@ async function main() {
     process.exitCode = 2
     return
   }
-  if (action !== 'reconcile' && action !== 'repair-press-release') {
-    console.error("缺少或不合法的 --action——必須是 'reconcile' 或 'repair-press-release'。")
+  if (action !== 'reconcile' && action !== 'repair-press-release' && action !== 'repair-status') {
+    console.error("缺少或不合法的 --action——必須是 'reconcile'、'repair-press-release' 或 'repair-status'。")
     process.exitCode = 2
     return
   }
@@ -257,6 +318,11 @@ async function main() {
     classifyCampaignForDrainAudit,
     classifyRecipientForDrainAudit,
     decideCampaignStatus,
+    // round 26 新增：--action repair-status 用的純函式與 Tx 協調層——見
+    // shared/campaignSend.ts 的 decideCampaignStatusRepair／
+    // repairCampaignStatusTx 完整說明。
+    decideCampaignStatusRepair,
+    repairCampaignStatusTx,
     CAMPAIGN_LEASE_MS,
     // Windows 修正：見 audit-campaign-drain.mjs 對應位置的說明──
     // compiledClassifierPath 是原始檔案系統路徑，動態載入需要合法的
@@ -330,8 +396,10 @@ async function main() {
 
   if (action === 'reconcile') {
     await runReconcile()
-  } else {
+  } else if (action === 'repair-press-release') {
     await runRepairPressRelease()
+  } else {
+    await runRepairStatus()
   }
 
   async function runReconcile() {
@@ -375,33 +443,46 @@ async function main() {
       )
     }
 
+    // round 26 修正（Part 1）：reconciliation 只是「校正卡住的 sending
+    // 收件人」的工具，只有分類恰好是 UNKNOWN 時才是正確的使用情境——
+    // ACTIVE（真的還在合法處理中）、INDETERMINATE（資料本身有問題，需要
+    // 先人工查清楚）、EXHAUSTED（acquireLease 自己也會被
+    // generation-exhausted 擋下）、SAFE（沒有東西需要校正）全部不合格。
+    // `confirmEligible` 是唯一權威來源——dry-run 的訊息與下面真正執行
+    // --confirm 時的前置檢查共用同一個布林值，不會有兩處各自判斷、可能
+    // 漂移的風險。
+    //
+    // ⚠️ round 26 修正的核心：過去不論 confirmEligible 是不是 true，只要
+    // `!confirm` 就無條件印出「加上 --confirm 重新執行才會真的呼叫
+    // reconcileCampaignDelivery()」——即使分類是 INDETERMINATE（本來就會
+    // 被下面擋下），這句話仍然暗示「加 --confirm 就會成功」，讓維運人員
+    // 誤以為這是一條可行的修復路徑。現在改成：不合格時，dry-run 也直接印出
+    // 「真的加上 --confirm 會被拒絕」的具體原因，不再印出那句暗示會成功的
+    // 通用訊息——這是純粹的輸出文字修正，reconcile 本身的 eligibility 判斷
+    // 邏輯（`classification !== 'UNKNOWN'` 這個條件本身）完全沒有改變。
+    const confirmEligible = loaded.classification.classification === 'UNKNOWN'
+    const confirmIneligibleReason =
+      `目前的稽核分類是 ${loaded.classification.classification}，不是 reconciliation 該處理的情境` +
+      '（reconciliation 只用來校正 UNKNOWN：sending 收件人租約過期，其餘健康）。' +
+      'ACTIVE 請等待自然完成；INDETERMINATE 需要先人工檢查資料，不是加 --confirm 就能執行；' +
+      'EXHAUSTED 需要人工 escalation（見 audit-campaign-drain.mjs 的說明）；' +
+      'SAFE 代表沒有東西需要校正——不論哪一種，加 --confirm 都會被拒絕，不會真的執行。'
+
     if (!confirm) {
-      console.log(
-        `加上 --confirm ${campaign} 重新執行才會真的呼叫 reconcileCampaignDelivery()——` +
-          '這會嘗試取得處理租約、把過期的 sending 收件人轉成 delivery_unknown、' +
-          '重新計算 totals 並收尾，全程不會呼叫 SMTP。',
-      )
+      if (confirmEligible) {
+        console.log(
+          `加上 --confirm ${campaign} 重新執行才會真的呼叫 reconcileCampaignDelivery()——` +
+            '這會嘗試取得處理租約、把過期的 sending 收件人轉成 delivery_unknown、' +
+            '重新計算 totals 並收尾，全程不會呼叫 SMTP。',
+        )
+      } else {
+        console.log(`⚠️ 這份 campaign 目前不符合 --confirm 的執行條件，即使加上 --confirm 也會被拒絕：${confirmIneligibleReason}`)
+      }
       return
     }
 
-    // round 18 新增（Finding 2 項目 5）：reconciliation 只是「校正卡住的
-    // sending 收件人」的工具，只有分類恰好是 UNKNOWN 時才是正確的使用
-    // 情境——ACTIVE（真的還在合法處理中）、INDETERMINATE（資料本身有
-    // 問題，需要先人工查清楚）、EXHAUSTED（acquireLease 自己也會被
-    // generation-exhausted 擋下）、SAFE（沒有東西需要校正）全部拒絕
-    // --confirm。⚠️ 這只是快速失敗用的前置檢查，不是唯一的安全機制——
-    // 真正的安全保證來自 reconcileCampaignDelivery() 自己在取得租約
-    // 「之後」重新驗證全部收件人狀態（見下面 deps.listAllRecipientStatuses
-    // 與 shared/campaignSend.ts 的 areAllRecipientStatusesKnown 說明）：
-    // 就算這裡的分類在檢查完之後、真正執行之前的極短時間內過期
-    //（TOCTOU），後面仍然會被攔下來，不會產生部分寫入。
-    if (loaded.classification.classification !== 'UNKNOWN') {
-      console.error(
-        `拒絕執行：目前的稽核分類是 ${loaded.classification.classification}，不是 reconciliation 該處理的情境` +
-          '（reconciliation 只用來校正 UNKNOWN：sending 收件人租約過期，其餘健康）。' +
-          'ACTIVE 請等待自然完成；INDETERMINATE 需要先人工檢查資料；EXHAUSTED 需要人工 escalation' +
-          '（見 audit-campaign-drain.mjs 的說明）；SAFE 代表沒有東西需要校正。',
-      )
+    if (!confirmEligible) {
+      console.error(`拒絕執行：${confirmIneligibleReason}`)
       process.exitCode = 2
       return
     }
@@ -635,6 +716,87 @@ async function main() {
       console.log(
         'campaign 缺少可信的完成時間（completedAt），為避免用修復當下時間冒充寄送時間，已拒絕寫入，請人工檢查。',
       )
+    }
+  }
+
+  /**
+   * round 26 新增：--action repair-status——只校正 campaign 頂層
+   * status／totals，讓它們跟 recipients 子集合真實的分佈一致，目前只支援
+   * completed → partial 這一種 transition（見 shared/campaignSend.ts 的
+   * decideCampaignStatusRepair() 完整說明；為什麼 reconcile 用不上這個
+   * 情境見本檔案上方 usage 說明與本輪報告）。
+   *
+   * dry-run 與 --confirm 都呼叫同一份 decideCampaignStatusRepair()／
+   * repairCampaignStatusTx()——dry-run 用一次非交易讀取（field mask，只讀
+   * decideCampaignStatusRepair() 需要的欄位，recipients 只選 status，不含
+   * email／姓名等 PII）；--confirm 在單一 Firestore transaction 內重新讀取
+   * 一次全新的資料，重新跑一次全部 eligibility 檢查，只有仍然合格才寫入
+   * ——TOCTOU（dry-run 之後、confirm 之前，或 transaction 因為 optimistic
+   * concurrency 重試之間）任何變化都會被這次重新驗證抓到，不會有部分寫入。
+   */
+  async function runRepairStatus() {
+    // round 26 修正：dry-run 讀取路徑抽成模組頂層 export 的
+    // createCampaignStatusRepairLoader()——內容跟原本內聯在這裡的版本完全
+    // 一樣，只是移到頂層讓 emulator 整合測試可以直接 import 呼叫同一份
+    // 程式碼（跟 loadClassification／createClassificationLoader 同一種
+    // 理由，見該處的說明）。
+    const loadCampaignStatusRepairDecision = createCampaignStatusRepairLoader(campaignRef, {
+      FieldPath,
+      decideCampaignStatusRepair,
+    })
+    const decision = await loadCampaignStatusRepairDecision()
+    if (decision.outcome === 'campaign-not-found') {
+      console.log('campaign 不存在，沒有東西可以修復。')
+      process.exitCode = 2
+      return
+    }
+    console.log('repair-status 判斷結果（dry-run 與 --confirm 的前置檢查都呼叫同一份 decideCampaignStatusRepair()）：')
+    console.log({
+      currentStatus: decision.currentStatus,
+      currentTotals: decision.currentTotals,
+      authoritativeStatus: decision.authoritativeStatus,
+      authoritativeTotals: decision.authoritativeTotals,
+      nonTerminalCount: decision.nonTerminalCount,
+      eligible: decision.outcome === 'eligible',
+      outcome: decision.outcome,
+      reason: decision.reason,
+    })
+    if (decision.outcome === 'eligible') {
+      console.log('如果加上 --confirm，會寫入下列 patch（實際值以 --confirm 當下重新驗證的結果為準）：', decision.patch)
+    }
+
+    if (!confirm) {
+      if (decision.outcome === 'eligible') {
+        console.log(`加上 --confirm ${campaign} 重新執行才會真的寫入上面的 patch——不會動任何 recipient 文件，也不會寄信。`)
+      } else if (decision.outcome === 'already-consistent') {
+        console.log('狀態已經跟真實收件人分佈一致，沒有東西需要修復，不需要（也不應該）加 --confirm。')
+      } else {
+        console.log(`⚠️ 這份 campaign 目前不符合 repair-status 的執行條件，即使加上 --confirm 也會被拒絕：${decision.reason}`)
+      }
+      return
+    }
+
+    const result = await db.runTransaction((tx) =>
+      repairCampaignStatusTx(
+        docTx(tx, campaignRef),
+        async () => {
+          const snap = await tx.get(campaignRef.collection('recipients').select('status'))
+          return snap.docs.map((d) => ({ status: d.data().status }))
+        },
+        () => ({
+          updatedAt: FieldValue.serverTimestamp(),
+          completedAt: FieldValue.delete(),
+        }),
+      ),
+    )
+    console.log('repairCampaignStatusTx 結果：', result)
+    if (result.outcome === 'eligible') {
+      console.log(`完成，status 已從 ${result.currentStatus} 修正為 ${result.authoritativeStatus}。`)
+    } else if (result.outcome === 'already-consistent') {
+      console.log('重新驗證時發現狀態已經一致（可能是重複執行，或另一個流程已經處理過），沒有寫入任何東西，屬於安全的 no-op。')
+    } else {
+      console.error(`拒絕修復（重新驗證時發現不再合格）：${result.reason}`)
+      process.exitCode = 1
     }
   }
 }
