@@ -86,100 +86,70 @@
  *   下方【部署 runbook 補充】。
  */
 import { pathToFileURL } from 'node:url'
-import { isDirectExecution, verifyBuildFreshness, compiledClassifierPath } from './audit-utils.mjs'
+import {
+  isDirectExecution,
+  verifyBuildFreshness,
+  compiledClassifierPath,
+  getDocumentByIdWithFieldMask,
+} from './audit-utils.mjs'
 import { runDrainAuditScan, DEFAULT_MAX_SCAN_ATTEMPTS } from './audit-scan.mjs'
 
-function parseArgs(argv) {
-  let project
-  for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === '--project') {
-      project = argv[i + 1]
-      i += 1
-    }
+export const CAMPAIGN_FIELDS = [
+  'status',
+  'recipientsReady',
+  'activeAttemptId',
+  'activeLeaseExpiresAtMs',
+  'activeLeaseExpiresAt',
+  'resolutionLeaseAttemptId',
+  'resolutionLeaseExpiresAtMs',
+  'leaseGeneration',
+  'createdByAttemptId',
+  'startedAtMs',
+  'startedAt',
+]
+export const STABILITY_FIELDS = ['leaseGeneration', 'activeAttemptId', 'resolutionLeaseAttemptId']
+
+export function stabilityFromSnap(snap) {
+  const data = snap.data()
+  return {
+    updateTimeMs: snap.updateTime.toMillis(),
+    leaseGeneration: data.leaseGeneration ?? null,
+    activeAttemptId: data.activeAttemptId ?? null,
+    resolutionLeaseAttemptId: data.resolutionLeaseAttemptId ?? null,
   }
-  return { project }
 }
 
-async function main() {
-  const { project } = parseArgs(process.argv.slice(2))
-  if (!project) {
-    console.error(
-      '缺少 Firebase project ID——請用 --project <id> 明確指定，這支腳本不會使用任何預設專案。',
-    )
-    process.exitCode = 2
-    return
-  }
-
-  const freshness = verifyBuildFreshness()
-  if (!freshness.fresh) {
-    console.error(`編譯產物無法證明是最新的，拒絕執行稽核：\n${freshness.reason}`)
-    console.error('建議一律使用 `npm run audit:drain -- --project <id>`——那個入口會自動先 build。')
-    process.exitCode = 2
-    return
-  }
-
-  // Windows 修正：compiledClassifierPath 是原始檔案系統路徑（`C:\...`），
-  // Node 的 ESM 動態載入要求絕對路徑必須是合法的 file 開頭的 URL，否則
-  // 會把 `C:` 誤認成不支援的 URL scheme 而丟出
-  // ERR_UNSUPPORTED_ESM_URL_SCHEME——只有這裡（真的要動態載入的那一刻）需要
-  // 轉成 file URL，verifyBuildFreshness() 等其餘檔案系統操作仍然用原本的
-  // filesystem path，不受影響。pathToFileURL 是 Node 官方 API，正確處理
-  // Windows 磁碟機代號、空白、Unicode、`#`、`%` 等需要跳脫的字元，不要自己
-  // 手刻字串拼接或反斜線取代。
-  //
-  // （這段註解刻意不把「動態載入」跟後面的括號寫在一起、也不用完整的
-  // `scheme://` 寫法──Vite 的 SSR 模組轉換用輕量 lexer 掃描 import 語法，
-  // 曾經觀察到純文字註解裡出現看起來像動態載入呼叫或完整 URL 的字樣時，
-  // 會誤判成真正的語法而讓整個檔案轉譯失敗；這裡只是註解措辭上的迴避，
-  // 不影響下面實際程式碼的行為。）
-  const { classifyCampaignForDrainAudit } = await import(pathToFileURL(compiledClassifierPath).href)
-
-  const { initializeApp } = await import('firebase-admin/app')
-  const { getFirestore, FieldPath } = await import('firebase-admin/firestore')
-
-  initializeApp({ projectId: project })
-  const db = getFirestore()
+/**
+ * round 25 新增：把 main() 原本內聯的 deps 組裝抽成可以獨立 export、獨立
+ * 測試的工廠函式——輸入一個已經連好線的 Firestore db（可以是指向正式專案，
+ * 也可以是指向 emulator）與 FieldPath，回傳 runDrainAuditScan() 需要的完整
+ * deps 物件。main() 底下改成呼叫這個函式，不再自己內聯定義一份——這樣
+ * emulator 整合測試才能呼叫「跟 production 100% 相同」的這份程式碼（含
+ * round 25 修正的 getDocumentByIdWithFieldMask() 查詢邏輯），不必在測試
+ * 檔案裡另外重新刻一份「看起來很像」的查詢邏輯（那樣兩邊一旦漂移，測試
+ * 綠燈不代表 production 是對的）。
+ *
+ * @param {FirebaseFirestore.Firestore} db
+ * @param {{FieldPath: {documentId(): FirebaseFirestore.FieldPath}}} deps firebase-admin/firestore 的 FieldPath
+ */
+export function createDrainAuditDeps(db, { FieldPath }) {
   const campaigns = db.collection('campaigns')
-
-  console.log(`唯讀稽核：專案 ${project}（不會修改任何 Firestore 資料）`)
-
-  const CAMPAIGN_FIELDS = [
-    'status',
-    'recipientsReady',
-    'activeAttemptId',
-    'activeLeaseExpiresAtMs',
-    'activeLeaseExpiresAt',
-    'resolutionLeaseAttemptId',
-    'resolutionLeaseExpiresAtMs',
-    'leaseGeneration',
-    'createdByAttemptId',
-    'startedAtMs',
-    'startedAt',
-  ]
-  const STABILITY_FIELDS = ['leaseGeneration', 'activeAttemptId', 'resolutionLeaseAttemptId']
-
-  function stabilityFromSnap(snap) {
-    const data = snap.data()
-    return {
-      updateTimeMs: snap.updateTime.toMillis(),
-      leaseGeneration: data.leaseGeneration ?? null,
-      activeAttemptId: data.activeAttemptId ?? null,
-      resolutionLeaseAttemptId: data.resolutionLeaseAttemptId ?? null,
-    }
-  }
 
   // round 20 新增（Finding 2）：真正連線 Firestore 的 deps 實作——純編排
   // 邏輯在 scripts/audit-scan.mjs（見該檔案開頭的完整說明），這裡只負責
   // 把每一個 deps 方法接到實際的 Firestore Admin SDK 呼叫。
-  const deps = {
+  return {
     async listCampaigns() {
       // 只要 id，不下載任何欄位——用來偵測掃描期間新建立的幽靈 campaign。
       const snap = await campaigns.select().get()
       return snap.docs.map((d) => ({ id: d.id }))
     },
     async readCampaignStabilityFields(id) {
-      const snap = await campaigns.doc(id).select(...STABILITY_FIELDS).get()
-      if (!snap.exists) return null
+      // round 25 修正：DocumentReference 沒有 .select()——見 audit-utils.mjs
+      // 的 getDocumentByIdWithFieldMask() 說明。改用「以文件 ID 精確比對的
+      // Query」，field mask（STABILITY_FIELDS）維持不變。
+      const snap = await getDocumentByIdWithFieldMask(campaigns, id, STABILITY_FIELDS, FieldPath)
+      if (!snap) return null
       return stabilityFromSnap(snap)
     },
     async readCampaignAndRecipientsAtomic(id) {
@@ -232,6 +202,66 @@ async function main() {
       )
     },
   }
+}
+
+function parseArgs(argv) {
+  let project
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--project') {
+      project = argv[i + 1]
+      i += 1
+    }
+  }
+  return { project }
+}
+
+async function main() {
+  const { project } = parseArgs(process.argv.slice(2))
+  if (!project) {
+    console.error(
+      '缺少 Firebase project ID——請用 --project <id> 明確指定，這支腳本不會使用任何預設專案。',
+    )
+    process.exitCode = 2
+    return
+  }
+
+  const freshness = verifyBuildFreshness()
+  if (!freshness.fresh) {
+    console.error(`編譯產物無法證明是最新的，拒絕執行稽核：\n${freshness.reason}`)
+    console.error('建議一律使用 `npm run audit:drain -- --project <id>`——那個入口會自動先 build。')
+    process.exitCode = 2
+    return
+  }
+
+  // Windows 修正：compiledClassifierPath 是原始檔案系統路徑（`C:\...`），
+  // Node 的 ESM 動態載入要求絕對路徑必須是合法的 file 開頭的 URL，否則
+  // 會把 `C:` 誤認成不支援的 URL scheme 而丟出
+  // ERR_UNSUPPORTED_ESM_URL_SCHEME——只有這裡（真的要動態載入的那一刻）需要
+  // 轉成 file URL，verifyBuildFreshness() 等其餘檔案系統操作仍然用原本的
+  // filesystem path，不受影響。pathToFileURL 是 Node 官方 API，正確處理
+  // Windows 磁碟機代號、空白、Unicode、`#`、`%` 等需要跳脫的字元，不要自己
+  // 手刻字串拼接或反斜線取代。
+  //
+  // （這段註解刻意不把「動態載入」跟後面的括號寫在一起、也不用完整的
+  // `scheme://` 寫法──Vite 的 SSR 模組轉換用輕量 lexer 掃描 import 語法，
+  // 曾經觀察到純文字註解裡出現看起來像動態載入呼叫或完整 URL 的字樣時，
+  // 會誤判成真正的語法而讓整個檔案轉譯失敗；這裡只是註解措辭上的迴避，
+  // 不影響下面實際程式碼的行為。）
+  const { classifyCampaignForDrainAudit } = await import(pathToFileURL(compiledClassifierPath).href)
+
+  const { initializeApp } = await import('firebase-admin/app')
+  const { getFirestore, FieldPath } = await import('firebase-admin/firestore')
+
+  initializeApp({ projectId: project })
+  const db = getFirestore()
+
+  console.log(`唯讀稽核：專案 ${project}（不會修改任何 Firestore 資料）`)
+
+  // round 25 修正：deps 組裝已經抽成模組頂層 export 的 createDrainAuditDeps()
+  // ——內容跟原本內聯在這裡的版本完全一樣（含 round 25 對
+  // readCampaignStabilityFields() 的 field-mask 修正），只是移到頂層讓
+  // emulator 整合測試可以直接 import 呼叫同一份程式碼。
+  const deps = createDrainAuditDeps(db, { FieldPath })
 
   const nowMs = Date.now()
   const scan = await runDrainAuditScan(deps, classifyCampaignForDrainAudit, nowMs)

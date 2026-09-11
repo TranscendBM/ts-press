@@ -103,3 +103,54 @@ export function verifyBuildFreshness({
 export function isDirectExecution(moduleUrl) {
   return Boolean(process.argv[1]) && fileURLToPath(moduleUrl) === process.argv[1]
 }
+
+/**
+ * round 25 新增：Firebase Admin SDK 的 `DocumentReference` 沒有 `.select()`
+ * ——只有 `Query`／`CollectionReference` 才有。之前 audit-campaign-drain.mjs
+ * 的 `readCampaignStabilityFields()` 與 ops-campaign-repair.mjs 的
+ * `loadClassification()` 都誤對 `campaigns.doc(id)`（`DocumentReference`）
+ * 呼叫 `.select()`，只要真的連線到 Firestore（emulator 或正式環境）就會丟出
+ * `TypeError: ... .select is not a function`——先前只用 fake 做單元測試，
+ * 從沒真的連過 Firestore，所以這個 bug 一直沒被抓到。
+ *
+ * 這個 helper 把「用 `FieldPath.documentId()` 查單一文件＋保留欄位遮罩」的
+ * 正確寫法（跟這支檔案原本就有、沒有這個 bug 的
+ * `readCampaignAndRecipientsAtomic()` 用的是同一招）抽出來，讓
+ * audit-campaign-drain.mjs 與 ops-campaign-repair.mjs 呼叫同一份邏輯，不必
+ * 各自複製一份查詢寫法（也不會有第三個地方悄悄漂移出另一份 `.doc().select()`
+ * 的錯誤用法）。
+ *
+ * 不是 `DocumentReference.get()`（那樣會下載整份文件，違反 field-mask 想
+ * 避免讀到 PII／無關內容的設計）；也不是 `.doc(id).select()`（那是這次要
+ * 修的 bug）——而是把 `.doc(id)` 換成「對整個 collection 做一次以文件 ID
+ * 精確比對的 Query」，Query 才有 `.select()`。
+ *
+ * 用文件 ID 精確查詢正常情況下只會得到 0 或 1 筆。如果不明原因查到超過 1
+ * 筆（理論上不應該發生），fail closed：直接 throw，不會靜默地只取
+ * `docs[0]` 當作沒事發生。
+ *
+ * 純函式、無副作用——不 import firebase-admin，也不初始化任何東西；
+ * `collectionRef`／`FieldPath` 都由呼叫端傳入，這個檔案本身仍然維持「只能
+ * 被 import，沒有任何 top-level 執行副作用」的約束。
+ *
+ * @param {FirebaseFirestore.CollectionReference} collectionRef
+ * @param {string} documentId
+ * @param {string[]} fields
+ * @param {{documentId(): FirebaseFirestore.FieldPath}} FieldPath firebase-admin/firestore 的 FieldPath
+ * @returns {Promise<FirebaseFirestore.QueryDocumentSnapshot | null>} 查無此文件回傳 null
+ */
+export async function getDocumentByIdWithFieldMask(collectionRef, documentId, fields, FieldPath) {
+  const querySnap = await collectionRef
+    .where(FieldPath.documentId(), '==', documentId)
+    .select(...fields)
+    .get()
+  if (querySnap.empty) return null
+  if (querySnap.size > 1) {
+    throw new Error(
+      `getDocumentByIdWithFieldMask: 用文件 ID 精確查詢卻查到 ${querySnap.size} 筆` +
+        `（collection=${collectionRef.path}, documentId=${documentId}）——這不應該發生，` +
+        'fail closed，拒絕回傳任何一筆，避免誤用到錯的文件資料。',
+    )
+  }
+  return querySnap.docs[0]
+}

@@ -15,6 +15,8 @@ export default defineConfig({
       'tests/storageRules.test.ts',
       'tests/campaignConcurrency.test.ts',
       'tests/cleanupQueueConcurrency.test.ts',
+      // round 25 新增：需要真正的 Firestore emulator，見 vitest.rules.config.ts。
+      'tests/campaignFieldMaskEmulator.test.ts',
     ],
   },
 })
