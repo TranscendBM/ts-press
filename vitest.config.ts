@@ -17,6 +17,28 @@ export default defineConfig({
       'tests/cleanupQueueConcurrency.test.ts',
       // round 25 新增：需要真正的 Firestore emulator，見 vitest.rules.config.ts。
       'tests/campaignFieldMaskEmulator.test.ts',
+      // round 26 新增：同上，--action repair-status 的 emulator 整合測試。
+      'tests/campaignStatusRepairEmulator.test.ts',
     ],
+    server: {
+      deps: {
+        // round 26：實測確認必要——目前這個版本的 Vite／Vitest 對
+        // functions/scripts/ 底下這幾支 .mjs CLI（ops-campaign-repair.mjs／
+        // audit-campaign-drain.mjs）裡「參數是執行期才算出來、無法靜態
+        // 分析」的 `import()`（見各檔案裡
+        // `pathToFileURL(compiledClassifierPath).href` 那一行）的 SSR 轉換
+        // 目前測試環境需要這個設定：拿掉這行後重跑 `npm run test:unit`，
+        // `tests/opsCampaignRepair.test.ts`（會 import ops-campaign-repair.mjs
+        // 取得 `parseArgs`）直接 `SyntaxError: Invalid or unexpected token`
+        // （939/946 通過，1 個檔案失敗、0 個測試執行——完整錯誤摘要見本輪
+        // 報告）。純 Node ESM `import()` 從頭到尾正常運作（`node --check`
+        // 通過，直接用 node 執行也正常），只有 Vite 的 SSR 轉換受影響。把
+        // 這個目錄底下的檔案標成 externalized，讓 Vitest 直接交給 Node
+        // 原生的 ESM loader 處理、完全略過 Vite 的轉換／打包，從根本避開
+        // 這個問題——實測比在呼叫點加 `/* @vite-ignore */` pragma 更可靠
+        // （後者單獨使用時不足以修好，同樣實測過）。
+        external: [/functions[\\/]scripts[\\/]/],
+      },
+    },
   },
 })
