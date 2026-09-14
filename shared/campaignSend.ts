@@ -4977,12 +4977,35 @@ export function classifySetupPhaseForDrainAudit(
  *（reconciliation 自己的 acquireLease 也會被同一個 generation-exhausted
  *  擋下），需要獨立的分類讓 runbook 能給出正確（也是唯一可行）的修復
  *  指引：直接人工重設 `leaseGeneration`，不是「檢查資料是不是壞的」。 */
+/** round 27 新增（Finding 1）：新增 'SAFE_WITH_WARNING'——語意上「不阻擋
+ *  部署」（跟 SAFE 一樣，`isDrainAuditBlocking()` 不會把它算進阻擋清單），
+ *  但**不能**被沒收進 SAFE 的計數或輸出裡：它代表「已知、範圍極窄、經過
+ *  逐項驗證的歷史資料落差」，不是「完全乾淨」。唯一目前會產生這個分類的
+ *  情境見 isLegacyCompletedPartialMismatchSafe() 的完整說明：這套 lease
+ *  機制部署之前建立的歷史 completed campaign，`recipientsReady`／
+ *  `createdAt`／`updatedAt`／`completedAt` 四個欄位全部完全缺失，沒有任何
+ *  owner／lease，收件人真實分佈也完全乾淨，唯一的異常訊號是宣稱的
+ *  completed 跟真實分佈重新算出來的 partial 不一致——round 26 已經確認
+ * 「把 status 改成 partial」本身不安全（會重新開放 retryCampaign 認領那些
+ *  failed 收件人），所以這裡改成讓稽核工具自己認得出這個已知形狀，不去動
+ *  任何資料。CLI 必須把它跟 SAFE 分開列出計數與明確的原因說明——見
+ *  functions/scripts/audit-campaign-drain.mjs 的 summarizeDrainAuditResults()。 */
 export type CampaignDrainClassification =
   | 'SAFE'
+  | 'SAFE_WITH_WARNING'
   | 'ACTIVE'
   | 'INDETERMINATE'
   | 'UNKNOWN'
   | 'EXHAUSTED'
+
+/** round 27 新增（Finding 1）：判斷一個 `CampaignDrainClassification` 是否
+ *  阻擋部署——SAFE／SAFE_WITH_WARNING 都不阻擋，其餘三種都阻擋。所有需要
+ *  判斷「能不能部署」的呼叫端（CLI 彙總、未來任何自動化 gate）都應該呼叫
+ *  這裡，不要各自寫一份 `!== 'SAFE'` 的比較——那樣的比較在新增
+ *  SAFE_WITH_WARNING 之後就是錯的（會把它也算成阻擋）。 */
+export function isDrainAuditBlocking(classification: CampaignDrainClassification): boolean {
+  return classification !== 'SAFE' && classification !== 'SAFE_WITH_WARNING'
+}
 
 export interface CampaignDrainAuditInput {
   campaignId: string
@@ -4999,6 +5022,20 @@ export interface CampaignDrainAuditInput {
   createdByAttemptId: unknown
   startedAtMs: unknown
   startedAtLegacy: unknown
+  /** round 27 新增（Finding 1），round 27 提交前審查修正：判斷「legacy
+   *  歷史 completed campaign」例外（見 isLegacyCompletedPartialMismatchSafe()
+   *  的完整說明）需要用 `isFieldAbsent()`（`hasOwnProperty` 包裝）證明
+   *  `recipientsReady`／`createdAt`／`updatedAt`／`completedAt` 四個欄位
+   *  「完全不存在」——這無法只從個別欄位的 `unknown` 值判斷（`value ===
+   *  undefined` 沒辦法區分「欄位不存在」跟「欄位存在、值恰好是
+   *  undefined」），必須拿到 field-masked 查詢讀回來的原始物件本身。⚠️
+   *  呼叫端必須確保自己的 field mask（例如 audit-campaign-drain.mjs 的
+   *  CAMPAIGN_FIELDS、ops-campaign-repair.mjs 的
+   *  CAMPAIGN_REPAIR_CLASSIFICATION_FIELDS）有包含這四個欄位——field mask
+   *  沒有請求的欄位，讀回來的物件上根本不會有這個 key，會被誤判成「文件裡
+   *  真的不存在這個欄位」，讓這裡的絕對缺席判斷失去意義。不提供這個欄位
+   *  （`undefined`）時，legacy 例外一律 fail closed，不嘗試用其他方式猜測。 */
+  campaignRawData?: Record<string, unknown>
   /** round 15 修正（Finding 4）：現在應該送入「全部」收件人，不再只是
    *  claimed／sending 的抽樣——見 classifyRecipientForDrainAudit 的說明。 */
   recipients: RecipientDrainSample[]
@@ -5045,10 +5082,28 @@ export interface CampaignDrainAuditResult {
    *  說明。sending／partial（非 terminal）這裡固定是 true：那兩種狀態
    *  本來就預期還有非終止的收件人，不適用這個不變量。 */
   recipientDistributionConsistent: boolean
+  /** round 27 新增（Finding 1）：只有這份 campaign 真的符合
+   *  isLegacyCompletedPartialMismatchSafe() 逐項驗證過的「歷史 completed
+   *  campaign」形狀，且這個落差本身就是唯一異常訊號時才是 true——這種情況
+   *  下 `classification` 會是 `'SAFE_WITH_WARNING'`，不是原本的
+   *  `'INDETERMINATE'`。這個欄位單純用來說明「這次 completed／partial 落差
+   *  有沒有被折算成不阻擋部署」，供 CLI 輸出／人工複核使用，跟
+   *  `leaseGenerationExhaustionHarmless` 是同一種設計：分類欄位本身
+   *  仍然可以直接看出結果，這裡額外提供「為什麼」的可稽核依據。恆為
+   *  false，除非上述條件全部成立。 */
+  legacyCompletedPartialMismatchWaived: boolean
   classification: CampaignDrainClassification
 }
 
-const DRAIN_SEVERITY: Record<CampaignDrainClassification, number> = {
+/** round 27 新增（Finding 1）：`SAFE_WITH_WARNING` 刻意**不**放進這張嚴重度
+ *  對照表——它不是由 setupPhase／lease／recipient／distribution 這幾個
+ *  子訊號的嚴重度直接算出來的，而是在下面 `classifyCampaignForDrainAudit()`
+ *  算出 pre-downgrade 的五種分類之一（一定會是 `INDETERMINATE`）之後，另外
+ *  用 `isLegacyCompletedPartialMismatchSafe()` 逐項驗證過才會覆寫成
+ *  `SAFE_WITH_WARNING`，不透過這張表參與嚴重度排序。 */
+type PreDowngradeClassification = Exclude<CampaignDrainClassification, 'SAFE_WITH_WARNING'>
+
+const DRAIN_SEVERITY: Record<PreDowngradeClassification, number> = {
   SAFE: 0,
   UNKNOWN: 1,
   ACTIVE: 2,
@@ -5155,6 +5210,15 @@ function countRecipientStatusesForAudit(recipients: RecipientDrainSample[]): Rec
 export interface RecipientDistributionAudit {
   consistent: boolean
   statusCounts: RecipientStatusCounts
+  /** round 27 新增（Finding 1）：terminal campaign 用真實收件人分佈重新算
+   *  出來的權威狀態——`isLegacyCompletedPartialMismatchSafe()` 需要確認這個
+   *  值「剛好」是 `'partial'`（不只是「跟 campaign.status 不一致」，兩者
+   *  在一般情況下等價，但明確存這個值可以避免呼叫端重新呼叫一次
+   *  `decideCampaignStatus()`，維持「同一個計算只做一次」的慣例）。非
+   *  terminal（sending／partial）或收件人本身有 malformed 值時固定是
+   *  `undefined`——這兩種情況本來就不受這個不變量約束／無法信任算出來的
+   *  結果，見上方對應分支的說明。 */
+  expectedStatus: CampaignStatus | undefined
 }
 
 function auditRecipientDistribution(
@@ -5164,17 +5228,17 @@ function auditRecipientDistribution(
 ): RecipientDistributionAudit {
   const statusCounts = countRecipientStatusesForAudit(recipients)
   if (!terminal) {
-    return { consistent: true, statusCounts }
+    return { consistent: true, statusCounts, expectedStatus: undefined }
   }
   if (statusCounts.malformed > 0) {
-    return { consistent: false, statusCounts }
+    return { consistent: false, statusCounts, expectedStatus: undefined }
   }
   const known: RecipientStatusForTotals[] = recipients.map((r) => ({
     status: r.status as RecipientStatus,
   }))
   const { totals, nonTerminalCount } = computeAuthoritativeRecipientTotals(known)
   const expectedStatus = decideCampaignStatus(totals, nonTerminalCount)
-  return { consistent: expectedStatus === status, statusCounts }
+  return { consistent: expectedStatus === status, statusCounts, expectedStatus }
 }
 
 /**
@@ -5236,6 +5300,160 @@ function isGenerationExhaustionHarmless(params: {
   if (params.unknownRecipientCount > 0) return false
   if (params.indeterminateRecipientCount > 0) return false
   if (!params.distributionConsistent) return false
+  return true
+}
+
+/**
+ * round 27 修正（提交前審查 Finding 1）：唯一權威的「這個欄位在原始物件上
+ * 完全不存在」判斷——用 `Object.prototype.hasOwnProperty.call()`，不是
+ * `value === undefined`。這兩者不一樣：一個物件可以「擁有」一個值剛好是
+ * `undefined` 的自有屬性（例如 `{ recipientsReady: undefined }`，這在物件
+ * 實字語法下會建立自有屬性，只是值是 undefined），這種情況下欄位其實
+ * 「存在」（曾經被明確寫入或設定過），不能算「完全缺席」——只有
+ * `hasOwnProperty` 回傳 false，才是真正的「這個 key 從來沒被寫進這個物件」。
+ * Firestore 文件透過 `.select(...)` 欄位遮罩讀回來的物件正好符合這個語意：
+ * 沒被遮罩選到、或文件本身真的沒有這個欄位，回傳物件上都不會有對應的 key。
+ */
+export function isFieldAbsent(data: Record<string, unknown>, field: string): boolean {
+  return !Object.prototype.hasOwnProperty.call(data, field)
+}
+
+/**
+ * round 27 新增（Finding 1）：判斷一份 campaign 是否符合這套 lease／
+ * reconciliation 機制部署之前建立的「歷史 completed campaign」形狀——這種
+ * 文件完全沒有 `recipientsReady`／`createdAt`／`updatedAt`／`completedAt`
+ * 四個欄位（不是 `false`／`null`，是欄位本身完全不存在），也從未被任何
+ * processing／resolution／setup 租約持有過，收件人真實分佈本身完全乾淨
+ *（只有 `sent`／`failed`），唯一的異常訊號是宣稱的 `completed` 跟真實分佈
+ * 重新算出來的 `partial` 不一致——這正是既有 `auditRecipientDistribution()`
+ * 會標成 INDETERMINATE 的情境（見該函式的說明）。
+ *
+ * ⚠️ 背景（round 27，真實情境）：一次唯讀 drain audit 發現一份 production
+ * campaign 正是這個形狀。round 26 新增的 `decideCampaignStatusRepair()`
+ * 明確拒絕修改這份文件的 `status`（見該函式與本輪報告的完整說明）：雖然
+ * 目前缺失的 `recipientsReady` 會讓 `decideAcquireCampaignLease()`（見
+ * `shared/campaignSend.ts` 開頭的說明）擋下 `retryCampaign`、無法真的重寄
+ * 任何東西，但如果未來有人把 `recipientsReady` 補回 `true`，
+ * `status:'partial'` 會重新開放 `retryCampaign` 認領那幾筆 `failed`
+ * 收件人，造成真正的重複寄送風險——這裡新增的是讓稽核工具「認得出」這個
+ * 已知、範圍極窄的歷史形狀，不阻擋部署，但也不去修改任何資料，跟
+ * repair-status 是兩件完全獨立的事。
+ *
+ * ⚠️ 這個降級刻意極度狹窄：以下每一項都是硬性條件，只要有一項不成立，就
+ * 整個 fail closed，維持原本（呼叫端傳入的 pre-downgrade）的分類，不做任何
+ * 「大致符合就放行」的寬鬆版本。逐項條件（跟本輪需求文件逐條對應）：
+ * 1. `campaignStatusValid` 為 true。
+ * 2. `status` 剛好是 `'completed'`。
+ * 3／4. `recipientsReady`／`createdAt`／`updatedAt`／`completedAt` 這四個
+ *    欄位在原始 Firestore 文件裡「完全不存在」——round 27 修正：不能只檢查
+ *    `value === undefined`，那沒辦法區分「欄位真的不存在」跟「欄位存在、
+ *    值剛好是 `false`／`null`／其他非 truthy 值」（在 JS 物件屬性存取的
+ *    語意下兩者讀出來都可能造成混淆；更嚴重的是不能只看 `unknown` 值本身）
+ *    ——一律改用 `isFieldAbsent()`（`Object.prototype.hasOwnProperty.call()`
+ *    的包裝）直接對呼叫端傳入的 `campaignRawData`（field-masked 查詢讀回來
+ *    的原始物件）判斷，這是唯一能正確區分「欄位不存在」與「欄位存在但值
+ *    恰好讀成 undefined」的方式。`campaignRawData` 本身缺席（呼叫端沒有
+ *    提供，例如舊測試沒有特地建構這個欄位）一律 fail closed，不嘗試用
+ *    `unknown` 值本身去猜。
+ * 5／6／8. processing／resolution 租約必須「乾淨地」回報 `'absent'`——不是
+ *    `stale`／`active`／`indeterminate`。直接重用呼叫端已經算出來的分類
+ *    結果，不是另外重新 parse 一次，維持「同一份判斷只寫一次」的慣例。
+ * 7／8. setup owner（`createdByAttemptId`）必須「乾淨地」absent——terminal
+ *    campaign 的 setupPhase 短路成 `'not-setup-phase'`，完全不會檢查這個
+ *    欄位（見下方 `classifyCampaignForDrainAudit` terminal 分支的說明），
+ *    這裡用跟 `decideCampaignStatusRepair()` 相同的 `parseLeaseOwner()`
+ *    自己補上。
+ * 9. `leaseGeneration` 本身必須是 `'ok'`（不是 `indeterminate`／
+ *    `exhausted`），且解析出來的值必須「剛好」是合法的 no-owner baseline
+ *   （`0`）——`classifyLeaseGenerationForDrainAudit()` 本身寬鬆許多（沒有
+ *    owner 時，即使 `leaseGeneration` 是任意非 baseline 的正整數也會回傳
+ *   `'ok'`，見該函式的說明），這裡的例外要求更嚴格：必須是「從未被任何人
+ *    acquire 過」的真正起始狀態。
+ * 10／11-15. 收件人分佈必須完全乾淨：沒有 `malformed`、沒有
+ *    `queued`／`claimed`／`sending`／`delivery_unknown`，`exhausted` 也必須
+ *    是 0（只允許 `sent`／`failed` 兩種）。逐項獨立檢查已知的統計數字，不
+ *    只依賴下面的 `consistent`／`expectedStatus`，即使那個計算本身有 bug，
+ *    這裡也要能各自擋下（跟 round 26 `decideCampaignStatusRepair()` 的
+ *    `no-failed-recipients` 是同一種 defense-in-depth 哲學）。
+ * 16／17. `failed > 0` 且 `sent > 0`。
+ * 18. （由上面 11-15 的 `exhausted===0` 涵蓋，這裡不重複。）
+ * 19／20. `auditRecipientDistribution()` 判定 `consistent:false`，且用真實
+ *    分佈重新算出來的 `expectedStatus` 剛好是 `'partial'`——兩者一起確認，
+ *    確保「不一致」的唯一原因就是 completed／partial 這組落差，不是其他
+ *    任何原因（例如 malformed 收件人也會讓 `consistent:false`，但那時
+ *    `expectedStatus` 是 `undefined`，不會等於 `'partial'`，一樣會被這裡
+ *    擋下）。
+ * 21. 呼叫端負責（`runDrainAuditScan()` 的穩定快照協定）——這個函式本身
+ *    不需要、也不能參與快照穩定性的判斷，只在快照已經確認穩定之後才會被
+ *    呼叫，見 `classifyCampaignForDrainAudit()` 與 `audit-scan.mjs` 的說明。
+ * 22. 上面 1-20 逐項獨立檢查，加上呼叫端額外傳入的
+ *    `activeRecipientCount`／`indeterminateRecipientCount`／
+ *    `unknownRecipientCount` 全部為 0（跟 `isGenerationExhaustionHarmless()`
+ *    用同一種 belt-and-suspenders 檢查）——任何一項不是 0，就代表還有其他
+ *    異常訊號存在，必須維持原本更嚴重的分類，不能被這裡覆蓋。
+ */
+function isLegacyCompletedPartialMismatchSafe(params: {
+  campaignStatusValid: boolean
+  status: string | undefined
+  /** round 27 修正：field-masked 查詢讀回來的原始 campaign 物件本身（不是
+   *  個別欄位的 `unknown` 值）——只有這樣才能用 `isFieldAbsent()` 正確判斷
+   *  「欄位完全不存在」，見上方函式說明條件 3／4。呼叫端沒有提供（例如
+   *  舊測試沒有特地建構這個欄位）一律視為無法證明缺席，fail closed。 */
+  campaignRawData: Record<string, unknown> | undefined
+  processingLease: LeaseAuditClassification
+  resolutionLease: LeaseAuditClassification
+  createdByAttemptId: unknown
+  leaseGenerationRaw: unknown
+  leaseGeneration: LeaseGenerationClassification
+  statusCounts: RecipientStatusCounts
+  distributionConsistent: boolean
+  expectedStatus: CampaignStatus | undefined
+  activeRecipientCount: number
+  indeterminateRecipientCount: number
+  unknownRecipientCount: number
+}): boolean {
+  if (!params.campaignStatusValid) return false
+  if (params.status !== 'completed') return false
+
+  // 條件 3／4：沒有原始物件可查就無法證明「完全缺席」，fail closed。
+  if (!params.campaignRawData) return false
+  const raw = params.campaignRawData
+  if (!isFieldAbsent(raw, 'recipientsReady')) return false
+  if (!isFieldAbsent(raw, 'createdAt')) return false
+  if (!isFieldAbsent(raw, 'updatedAt')) return false
+  if (!isFieldAbsent(raw, 'completedAt')) return false
+
+  // 條件 5／6／8：重用呼叫端已經算出來的 processing／resolution 租約分類。
+  if (params.processingLease !== 'absent') return false
+  if (params.resolutionLease !== 'absent') return false
+
+  // 條件 7／8：setup owner 用跟 decideCampaignStatusRepair() 相同的 parser。
+  if (parseLeaseOwner(params.createdByAttemptId) !== 'absent') return false
+
+  // 條件 9：leaseGeneration 必須乾淨，且剛好是合法的 no-owner baseline。
+  if (params.leaseGeneration !== 'ok') return false
+  if (readLeaseGeneration(params.leaseGenerationRaw) !== 0) return false
+
+  // 條件 10／11-18：收件人分佈逐項獨立檢查。
+  const c = params.statusCounts
+  if (c.malformed !== 0) return false
+  if (c.queued !== 0) return false
+  if (c.claimed !== 0) return false
+  if (c.sending !== 0) return false
+  if (c.delivery_unknown !== 0) return false
+  if (c.exhausted !== 0) return false
+  if (!(c.failed > 0)) return false
+  if (!(c.sent > 0)) return false
+
+  // 條件 19／20：不一致的唯一原因必須是 completed／partial 這組落差。
+  if (params.distributionConsistent) return false
+  if (params.expectedStatus !== 'partial') return false
+
+  // 條件 22：沒有其他任何 recipient 層級的異常訊號殘留。
+  if (params.activeRecipientCount !== 0) return false
+  if (params.indeterminateRecipientCount !== 0) return false
+  if (params.unknownRecipientCount !== 0) return false
+
   return true
 }
 
@@ -5368,9 +5586,41 @@ export function classifyCampaignForDrainAudit(
     worstRecipientSeverity,
     distributionSeverity,
   )
-  const classification = (Object.keys(DRAIN_SEVERITY) as CampaignDrainClassification[]).find(
-    (key) => DRAIN_SEVERITY[key] === worstSeverity,
-  ) as CampaignDrainClassification
+  const preDowngradeClassification = (
+    Object.keys(DRAIN_SEVERITY) as PreDowngradeClassification[]
+  ).find((key) => DRAIN_SEVERITY[key] === worstSeverity) as PreDowngradeClassification
+
+  // round 27 新增（Finding 1）：只有 pre-downgrade 的結果本身就已經是
+  // INDETERMINATE（代表沒有任何訊號比它更嚴重，見 isLegacyCompletedPartialMismatchSafe()
+  // 文件開頭條件 20／22 的說明——EXHAUSTED 的嚴重度比 INDETERMINATE 高，
+  // 一旦存在，pre-downgrade 分類本身就不會是 INDETERMINATE，這裡的檢查會
+  // 自動排除它，不需要另外判斷 leaseGeneration！=='exhausted'）才會嘗試套用
+  // 這個例外——這是跟既有 leaseGenerationExhaustionHarmless 相同的
+  // belt-and-suspenders 寫法：即使 isLegacyCompletedPartialMismatchSafe()
+  // 本身的判斷式有 bug，這裡的外層 gate 仍然能擋下「把 ACTIVE／
+  // UNKNOWN／EXHAUSTED 誤降級成 SAFE_WITH_WARNING」這種更嚴重的錯誤。
+  const legacyCompletedPartialMismatchWaived =
+    preDowngradeClassification === 'INDETERMINATE' &&
+    isLegacyCompletedPartialMismatchSafe({
+      campaignStatusValid,
+      status,
+      campaignRawData: input.campaignRawData,
+      processingLease,
+      resolutionLease,
+      createdByAttemptId: input.createdByAttemptId,
+      leaseGenerationRaw: input.leaseGeneration,
+      leaseGeneration,
+      statusCounts: distributionAudit.statusCounts,
+      distributionConsistent: distributionAudit.consistent,
+      expectedStatus: distributionAudit.expectedStatus,
+      activeRecipientCount,
+      indeterminateRecipientCount,
+      unknownRecipientCount,
+    })
+
+  const classification: CampaignDrainClassification = legacyCompletedPartialMismatchWaived
+    ? 'SAFE_WITH_WARNING'
+    : preDowngradeClassification
 
   return {
     campaignId: input.campaignId,
@@ -5387,6 +5637,7 @@ export function classifyCampaignForDrainAudit(
     unknownRecipientCount,
     recipientStatusCounts: distributionAudit.statusCounts,
     recipientDistributionConsistent: distributionAudit.consistent,
+    legacyCompletedPartialMismatchWaived,
     classification,
   }
 }

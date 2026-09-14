@@ -6,6 +6,7 @@ import {
   type CampaignDrainClassification,
   type CampaignTotalsForFinalize,
   classifyCampaignForDrainAudit,
+  isDrainAuditBlocking,
   classifyLeaseForAudit,
   classifyLeaseGenerationForDrainAudit,
   classifyRecipientForDrainAudit,
@@ -7469,6 +7470,12 @@ describe('classifyCampaignForDrainAudit（round 14 新增，Finding 3：跟部�
       createdByAttemptId: undefined,
       startedAtMs: undefined,
       startedAtLegacy: undefined,
+      // round 27 修正（提交前審查 Finding 1）：不提供 campaignRawData——
+      // isLegacyCompletedPartialMismatchSafe() 在缺少這個欄位時一律 fail
+      // closed，這個 describe 區塊既有的測試都是 status:'sending'（terminal
+      // 為 false，legacy 例外本來就不適用），不需要它。SAFE_WITH_WARNING 的
+      // 專屬矩陣在下面獨立的 describe 區塊，會自己建構包含 campaignRawData
+      // 的輸入。
       recipients: [],
       ...overrides,
     }
@@ -8503,6 +8510,453 @@ describe('classifyCampaignForDrainAudit（round 14 新增，Finding 3：跟部�
         )
         expect(result.leaseGenerationExhaustionHarmless).toBe(false)
         expect(result.classification).not.toBe('SAFE')
+      },
+    )
+  })
+
+  // round 27 新增（Finding 1）：SAFE_WITH_WARNING——這套 lease 機制部署之前
+  // 建立的歷史 completed campaign，recipientsReady／createdAt／updatedAt／
+  // completedAt 四個欄位完全缺失，沒有任何 owner，收件人真實分佈只有
+  // sent／failed，唯一的異常訊號是宣稱的 completed 跟真實分佈重新算出來的
+  // partial 不一致。這裡用完全合成、刻意跟真實資料（人數、campaignId）不同
+  // 的數字，逐項驗證 isLegacyCompletedPartialMismatchSafe() 的每一個硬性
+  // 條件，任何一項不成立都必須 fail closed，維持原本（通常是 INDETERMINATE）
+  // 的分類，不能被誤判成 SAFE_WITH_WARNING。
+  describe('SAFE_WITH_WARNING（round 27 新增，Finding 1：歷史 completed campaign，completed／partial 落差已知且範圍極窄）', () => {
+    function legacyRecipient(status: string): RecipientDrainSample {
+      return { status, leaseExpiresAtMs: undefined, leaseExpiresAtLegacy: undefined }
+    }
+
+    /** 完全符合 legacy 例外形狀的 campaign——4 筆 sent、2 筆 failed（刻意
+     *  跟真實 production 資料的 113/3/116 不同，避免任何人誤以為這裡引用
+     *  了真實資料）。`campaignRawData: {}` 是一個真正「什麼欄位都沒有」的
+     *  原始物件——`Object.prototype.hasOwnProperty.call({}, field)` 對任何
+     *  field 都回傳 false，代表 recipientsReady／createdAt／updatedAt／
+     *  completedAt 這四個欄位在這份「文件」裡完全不存在，不是恰好讀到
+     *  undefined。單一測試只覆寫想驗證的那個欄位，其餘全部維持「本來應該
+     *  會通過」的樣子。 */
+    function legacyInput(overrides: Partial<CampaignDrainAuditInput> = {}): CampaignDrainAuditInput {
+      return {
+        campaignId: 'synthetic-legacy-campaign',
+        status: 'completed',
+        recipientsReady: undefined,
+        activeAttemptId: undefined,
+        activeLeaseExpiresAtMs: undefined,
+        activeLeaseExpiresAtLegacy: undefined,
+        resolutionLeaseAttemptId: undefined,
+        resolutionLeaseExpiresAtMs: undefined,
+        leaseGeneration: undefined,
+        createdByAttemptId: undefined,
+        startedAtMs: undefined,
+        startedAtLegacy: undefined,
+        campaignRawData: {},
+        recipients: [
+          legacyRecipient('sent'),
+          legacyRecipient('sent'),
+          legacyRecipient('sent'),
+          legacyRecipient('sent'),
+          legacyRecipient('failed'),
+          legacyRecipient('failed'),
+        ],
+        ...overrides,
+      }
+    }
+
+    it('完全符合 legacy 形狀（四個欄位在原始物件上完全不存在）→ SAFE_WITH_WARNING，legacyCompletedPartialMismatchWaived:true，distribution 本身仍然誠實回報 inconsistent', () => {
+      const result = classifyCampaignForDrainAudit(legacyInput(), NOW)
+      expect(result.classification).toBe('SAFE_WITH_WARNING')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(true)
+      expect(result.recipientDistributionConsistent).toBe(false)
+      expect(result.recipientStatusCounts).toEqual({
+        queued: 0,
+        claimed: 0,
+        sending: 0,
+        sent: 4,
+        failed: 2,
+        exhausted: 0,
+        delivery_unknown: 0,
+        malformed: 0,
+      })
+    })
+
+    it('沒有提供 campaignRawData（undefined）→ 無法證明缺席，fail closed，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(legacyInput({ campaignRawData: undefined }), NOW)
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('recipientsReady 在原始物件上是 false（own property）→ 不合格，維持 INDETERMINATE（terminal campaign 的 setupPhase 短路成 not-setup-phase，唯一的訊號仍然是 distribution 不一致）', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({ campaignRawData: { recipientsReady: false } }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('recipientsReady 在原始物件上是 true（own property）→ 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({ campaignRawData: { recipientsReady: true } }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('recipientsReady 在原始物件上是 null（own property，不是嚴格的「不存在」）→ 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({ campaignRawData: { recipientsReady: null } }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('recipientsReady 在原始物件上是非空字串 → 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({ campaignRawData: { recipientsReady: 'true' } }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('recipientsReady 在原始物件上是空字串 → 不合格，維持 INDETERMINATE（field 依然是 own property，即使值是空字串）', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({ campaignRawData: { recipientsReady: '' } }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('recipientsReady 是物件實字明確賦值的 own property，值恰好是 undefined（hasOwnProperty 仍然是 true）→ 不合格，維持 INDETERMINATE——這正是「不能只用 value === undefined 判斷」的核心案例', () => {
+      const rawData: Record<string, unknown> = { recipientsReady: undefined }
+      expect(Object.prototype.hasOwnProperty.call(rawData, 'recipientsReady')).toBe(true)
+      const result = classifyCampaignForDrainAudit(legacyInput({ campaignRawData: rawData }), NOW)
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('createdAt 在原始物件上存在（own property）→ 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({ campaignRawData: { createdAt: 1_600_000_000_000 } }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('createdAt 在原始物件上是 null（own property）→ 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(legacyInput({ campaignRawData: { createdAt: null } }), NOW)
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('updatedAt 在原始物件上存在（own property）→ 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({ campaignRawData: { updatedAt: 1_600_000_000_000 } }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('updatedAt 在原始物件上是 null（own property）→ 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(legacyInput({ campaignRawData: { updatedAt: null } }), NOW)
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('completedAt 在原始物件上存在（own property）→ 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({ campaignRawData: { completedAt: 1_600_000_000_000 } }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('completedAt 在原始物件上是 null（own property）→ 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(legacyInput({ campaignRawData: { completedAt: null } }), NOW)
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('processing lease owner 存在（即使租約已過期）→ 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({
+          activeAttemptId: 'someone',
+          activeLeaseExpiresAtMs: NOW - 1000, // 已過期，processingLease 本身仍然是 'stale'（severity SAFE）
+          leaseGeneration: 1, // owner 存在時的合法 generation，避免額外觸發 leaseGeneration 的 indeterminate
+        }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+      expect(result.processingLease).toBe('stale')
+    })
+
+    // 提交前審查 Finding 2（額外組合測試）：legacy completed／partial
+    // mismatch 疊加「processing lease owner 存在，但租約到期時間欄位本身
+    // 格式錯誤（無法解析）」——這跟上面「owner 存在但租約已過期」不同，
+    // processingLease 分類本身會是 'indeterminate'（無法證明過期或有效，
+    // fail closed），不是 'stale'，用來確認 legacy 例外對這兩種不同的
+    // lease 異常型態都同樣不合格，不會因為分類細節不同就意外放行。
+    it('processing lease owner 存在、且租約到期時間欄位格式錯誤（無法解析）→ processingLease 是 indeterminate，不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({
+          activeAttemptId: 'someone',
+          activeLeaseExpiresAtMs: 'not-a-timestamp',
+          leaseGeneration: 1,
+        }),
+        NOW,
+      )
+      expect(result.processingLease).toBe('indeterminate')
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('resolution lease owner 存在（即使租約已過期）→ 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({
+          resolutionLeaseAttemptId: 'admin',
+          resolutionLeaseExpiresAtMs: NOW - 1000,
+          leaseGeneration: 1,
+        }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+      expect(result.resolutionLease).toBe('stale')
+    })
+
+    it('setup owner（createdByAttemptId）存在 → 不合格，維持 INDETERMINATE（terminal campaign 的既有邏輯完全不檢查這個欄位，這是本輪新增的獨立檢查）', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({ createdByAttemptId: 'setup-owner-1' }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('leaseGeneration 是畸形值 → 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({ leaseGeneration: 'not-a-number' }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+      expect(result.leaseGeneration).toBe('indeterminate')
+    })
+
+    // 提交前審查 Finding 2（額外組合測試）：legacy completed／partial
+    // mismatch 疊加 leaseGeneration 已耗盡（Number.MAX_SAFE_INTEGER）——這
+    // 個組合刻意驗證兩件事同時成立：(1) isGenerationExhaustionHarmless()
+    // 本身要求 distributionConsistent===true 才會把 EXHAUSTED 折算成
+    // harmless／SAFE（round 20 修正），這份 campaign 的 distribution 恰好
+    // 是「不一致」（legacy mismatch 的定義本身），所以 harmless 條件不成立，
+    // 維持真正的 EXHAUSTED，不會被折算成 SAFE；(2) EXHAUSTED 的
+    // severity（4）比 INDETERMINATE（3）高，pre-downgrade 分類會是
+    // EXHAUSTED 而不是 INDETERMINATE，round 27 的 legacy 例外只在
+    // pre-downgrade 恰好是 INDETERMINATE 時才會嘗試套用（見
+    // classifyCampaignForDrainAudit() 裡的外層 gate），所以這裡連
+    // isLegacyCompletedPartialMismatchSafe() 都不會被呼叫到，
+    // legacyCompletedPartialMismatchWaived 必須是 false。
+    it('leaseGeneration 已耗盡（Number.MAX_SAFE_INTEGER）→ EXHAUSTED（不是 SAFE_WITH_WARNING、也不是被 harmless 折算成 SAFE，因為 distribution 本身不一致）', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({ leaseGeneration: Number.MAX_SAFE_INTEGER }),
+        NOW,
+      )
+      expect(result.leaseGeneration).toBe('exhausted')
+      expect(result.leaseGenerationExhaustionHarmless).toBe(false)
+      expect(result.classification).toBe('EXHAUSTED')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('queued > 0 → 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({ recipients: [...legacyInput().recipients, legacyRecipient('queued')] }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('claimed > 0（租約已過期，單一 recipient 分類器本身回報 safe）→ 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({
+          recipients: [
+            ...legacyInput().recipients,
+            { status: 'claimed', leaseExpiresAtMs: NOW - 1000, leaseExpiresAtLegacy: undefined },
+          ],
+        }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    // 提交前審查 Finding 2（額外組合測試）：跟上面「claimed 但租約已過期」
+    // 不同，這裡的租約「尚未過期」——單一 recipient 分類器本身會回報
+    // 'active'（severity 2），跟 distribution 不一致的 severity（3，
+    // INDETERMINATE）同時存在。worstSeverity 仍然是 3（INDETERMINATE 比
+    // active 更嚴重），outer gate（preDowngradeClassification==='INDETERMINATE'）
+    // 因此還是會嘗試呼叫 isLegacyCompletedPartialMismatchSafe()——這裡驗證
+    // 的正是條件 22 的 activeRecipientCount!==0 這一支獨立防線真的有效，
+    // 不是只靠 statusCounts.claimed!==0 那一支檢查單獨撐住。
+    it('claimed > 0（租約尚未過期，單一 recipient 分類器回報 active）→ activeRecipientCount 非 0，不合格，維持 INDETERMINATE——驗證條件 22 的獨立防線，不只是靠 statusCounts.claimed', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({
+          recipients: [
+            ...legacyInput().recipients,
+            { status: 'claimed', leaseExpiresAtMs: NOW + 60_000, leaseExpiresAtLegacy: undefined },
+          ],
+        }),
+        NOW,
+      )
+      expect(result.activeRecipientCount).toBe(1)
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('sending > 0 → 不合格，維持 INDETERMINATE（這裡不可避免地也會讓單一 recipient 分類器回報 unknown，兩個訊號同時存在，但都不足以蓋過 INDETERMINATE 的 severity，最終分類仍然是 INDETERMINATE）', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({
+          recipients: [...legacyInput().recipients, legacyRecipient('sending')],
+        }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('delivery_unknown > 0 → 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({ recipients: [...legacyInput().recipients, legacyRecipient('delivery_unknown')] }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('存在 malformed 的收件人 status → 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({ recipients: [...legacyInput().recipients, legacyRecipient('not-a-real-status')] }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('failed 剛好是 0（只有 sent）→ 這其實是完全一致、乾乾淨淨的 completed campaign，分類是 SAFE，不是 SAFE_WITH_WARNING（沒有任何落差需要警告）', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({
+          recipients: [legacyRecipient('sent'), legacyRecipient('sent'), legacyRecipient('sent')],
+        }),
+        NOW,
+      )
+      expect(result.recipientDistributionConsistent).toBe(true)
+      expect(result.classification).toBe('SAFE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('sent 剛好是 0（只有 failed）→ 不合格，維持 INDETERMINATE（真實分佈仍然會自然推出 partial，但缺少至少一筆 sent 本身就不符合這個例外要求的形狀）', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({
+          recipients: [legacyRecipient('failed'), legacyRecipient('failed')],
+        }),
+        NOW,
+      )
+      expect(result.recipientDistributionConsistent).toBe(false)
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('exhausted > 0 → 不合格，維持 INDETERMINATE', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({ recipients: [...legacyInput().recipients, legacyRecipient('exhausted')] }),
+        NOW,
+      )
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('權威狀態重新算出來不是 partial（只有 sent／delivery_unknown，nonTerminalCount===0 且 deliveryUnknown>0 自然推出 needs_review）→ 不合格，維持 INDETERMINATE——⚠️ 依 decideCampaignStatus() 的公式，只要 failed>0 就一定會讓 nonTerminalCount>0、權威狀態一定是 partial，所以這個情境無法在不同時違反「failed>0」的前提下單獨重現，這裡刻意選一個 failed===0 的分佈來讓權威狀態變成 partial 以外的值', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({
+          recipients: [legacyRecipient('sent'), legacyRecipient('delivery_unknown')],
+        }),
+        NOW,
+      )
+      expect(result.recipientDistributionConsistent).toBe(false)
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it.each(['failed', 'needs_review', 'sending', 'partial'] as const)(
+      '宣稱的 status 是 %s（不是 completed）→ 不合格，維持 INDETERMINATE',
+      (status) => {
+        const result = classifyCampaignForDrainAudit(legacyInput({ status }), NOW)
+        expect(result.classification).toBe('INDETERMINATE')
+        expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+      },
+    )
+
+    it('legacy 形狀之外「同時」存在另一個獨立、更嚴重的問題（leaseGeneration 已耗盡）→ 必須回報更嚴重的分類（EXHAUSTED），不是 SAFE_WITH_WARNING——isGenerationExhaustionHarmless() 本身也會因為 distributionConsistent:false 而拒絕把這個 exhausted 折算成 SAFE，兩個獨立的防線同時擋下', () => {
+      const result = classifyCampaignForDrainAudit(
+        legacyInput({ leaseGeneration: Number.MAX_SAFE_INTEGER }),
+        NOW,
+      )
+      expect(result.classification).toBe('EXHAUSTED')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+      expect(result.leaseGenerationExhaustionHarmless).toBe(false)
+    })
+
+    it('isKnownCampaignStatus() 認可的合法值以外的 status（例如亂打的字串）→ 不合格，維持 INDETERMINATE（campaignStatusValid:false 本身就會把整體拉到 INDETERMINATE）', () => {
+      const result = classifyCampaignForDrainAudit(legacyInput({ status: 'in_progress' }), NOW)
+      expect(result.campaignStatusValid).toBe(false)
+      expect(result.classification).toBe('INDETERMINATE')
+      expect(result.legacyCompletedPartialMismatchWaived).toBe(false)
+    })
+
+    it('一批多份 campaign（部分 SAFE、部分 SAFE_WITH_WARNING）→ isDrainAuditBlocking() 對兩者都回傳 false，證明彙總／exit-code 邏輯會把兩者都當成不阻擋部署', () => {
+      const safeResult = classifyCampaignForDrainAudit(
+        baseInput({ status: 'completed', recipientsReady: true, recipients: [] }),
+        NOW,
+      )
+      const warningResult = classifyCampaignForDrainAudit(legacyInput(), NOW)
+      expect(safeResult.classification).toBe('SAFE')
+      expect(warningResult.classification).toBe('SAFE_WITH_WARNING')
+
+      const batch = [safeResult, warningResult]
+      expect(batch.map((r) => r.classification)).toEqual(['SAFE', 'SAFE_WITH_WARNING'])
+      expect(batch.every((r) => !isDrainAuditBlocking(r.classification))).toBe(true)
+      // 而任何一份真正阻擋部署的分類，isDrainAuditBlocking() 必須回傳 true——
+      // 確認這不是一個「永遠回傳 false」的退化實作。
+      expect(
+        isDrainAuditBlocking(
+          classifyCampaignForDrainAudit(
+            legacyInput({ activeAttemptId: 'someone', activeLeaseExpiresAtMs: NOW + 1000 }),
+            NOW,
+          ).classification,
+        ),
+      ).toBe(true)
+    })
+  })
+
+  describe('isDrainAuditBlocking（round 27 新增，Finding 1：SAFE／SAFE_WITH_WARNING 都不阻擋部署，其餘三種都阻擋）', () => {
+    it.each(['SAFE', 'SAFE_WITH_WARNING'] as CampaignDrainClassification[])(
+      '%s → false（不阻擋部署）',
+      (classification) => {
+        expect(isDrainAuditBlocking(classification)).toBe(false)
+      },
+    )
+
+    it.each(['ACTIVE', 'UNKNOWN', 'INDETERMINATE', 'EXHAUSTED'] as CampaignDrainClassification[])(
+      '%s → true（阻擋部署）',
+      (classification) => {
+        expect(isDrainAuditBlocking(classification)).toBe(true)
       },
     )
   })

@@ -4,7 +4,17 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { verifyBuildFreshness, getDocumentByIdWithFieldMask } from '../functions/scripts/audit-utils.mjs'
 import { runDrainAuditScan, DEFAULT_MAX_SCAN_ATTEMPTS } from '../functions/scripts/audit-scan.mjs'
-import { classifyCampaignForDrainAudit, type CampaignDrainAuditInput } from '../shared/campaignSend'
+import {
+  summarizeDrainAuditResults,
+  LEGACY_COMPLETED_PARTIAL_WARNING_REASON,
+  CAMPAIGN_FIELDS,
+} from '../functions/scripts/audit-campaign-drain.mjs'
+import { CAMPAIGN_REPAIR_CLASSIFICATION_FIELDS } from '../functions/scripts/ops-campaign-repair.mjs'
+import {
+  classifyCampaignForDrainAudit,
+  type CampaignDrainAuditInput,
+  type RecipientDrainSample,
+} from '../shared/campaignSend'
 
 /**
  * round 25 新增：getDocumentByIdWithFieldMask() 的純函式行為（不連線任何
@@ -417,5 +427,227 @@ describe('runDrainAuditScan（round 20 新增，Finding 2：掃描期間一致�
     })
     expect(result.stable).toBe(false)
     expect(result.attempts[0].unstableCampaignIds).toEqual(['c-unstable'])
+  })
+
+  // round 27 新增（Finding 1）：一份符合 legacy 例外形狀的 completed
+  // campaign（跟 tests/campaignSend.test.ts 的 SAFE_WITH_WARNING 矩陣用
+  // 同一種合成資料慣例，跟真實資料的 campaignId／人數完全不同），在完整
+  // 掃描協定裡也確實會被分類成 SAFE_WITH_WARNING——證明 round 20 新增的
+  // 穩定快照協定（見 audit-scan.mjs）跟這裡新增的分類邏輯正確接軌，
+  // SAFE_WITH_WARNING 不會被穩定性檢查誤傷，也不會繞過它。
+  it('legacy 形狀的 completed campaign，在穩定的掃描窗口內 → stable:true，分類為 SAFE_WITH_WARNING', async () => {
+    const legacyRecipients: CampaignDrainAuditInput['recipients'] = [
+      { status: 'sent', leaseExpiresAtMs: undefined, leaseExpiresAtLegacy: undefined },
+      { status: 'sent', leaseExpiresAtMs: undefined, leaseExpiresAtLegacy: undefined },
+      { status: 'failed', leaseExpiresAtMs: undefined, leaseExpiresAtLegacy: undefined },
+    ]
+    const script = makeCampaignScript(
+      'synthetic-scan-legacy',
+      [stableFields(), stableFields(), stableFields()],
+      // round 27 提交前審查修正：campaignRawData:{} 是一個真正「什麼欄位
+      // 都沒有」的原始物件，讓 isFieldAbsent()／hasOwnProperty 判斷
+      // recipientsReady／createdAt／updatedAt／completedAt 完全不存在——
+      // 不能只靠「這個 JS 測試物件沒設這幾個 key」，round 27 提交前審查已
+      // 改成必須看 campaignRawData 本身。
+      { status: 'completed', campaignRawData: {} },
+      legacyRecipients,
+    )
+    const deps = buildDeps([script])
+    const result = await runDrainAuditScan(deps, classifyCampaignForDrainAudit, NOW_MS)
+    expect(result.stable).toBe(true)
+    expect(result.results).toHaveLength(1)
+    expect(result.results[0].classification).toBe('SAFE_WITH_WARNING')
+  })
+
+  // 提交前審查 Finding 2（額外組合測試）：同一份 legacy 形狀的 campaign，
+  // 但這次讓 before／atomic／after 三次讀取本身不一致（掃描期間有人取得了
+  // 處理租約）——證明「這份 campaign 的內容長得像 legacy 例外」完全不影響
+  // 外層的穩定快照協定：協定本身在 classify() 被呼叫之前就已經判定不穩定，
+  // 重試預算用盡後 stable:false、results 是空陣列，不會有任何分類結果
+  // （更不可能是 SAFE_WITH_WARNING）流出去。這對應 isLegacyCompletedPartialMismatchSafe()
+  // 文件裡條件 21「快照穩定性由呼叫端負責，這個函式本身不參與、也不能參與」
+  // 的實際證明。
+  it('legacy 形狀的 completed campaign，但快照本身持續不穩定 → stable:false，不回傳任何分類結果（不會是 SAFE_WITH_WARNING，也不是任何其他分類）', async () => {
+    const legacyRecipients: CampaignDrainAuditInput['recipients'] = [
+      { status: 'sent', leaseExpiresAtMs: undefined, leaseExpiresAtLegacy: undefined },
+      { status: 'failed', leaseExpiresAtMs: undefined, leaseExpiresAtLegacy: undefined },
+    ]
+    // 每一輪重試都讀到不同的 leaseGeneration，永遠不會穩定下來。
+    let counter = 0
+    const script = {
+      id: 'synthetic-scan-legacy-unstable',
+      readStability: async () => {
+        counter += 1
+        return { updateTimeMs: counter, leaseGeneration: null, activeAttemptId: null, resolutionLeaseAttemptId: null }
+      },
+      readAtomic: async () => {
+        counter += 1
+        return {
+          campaign: {
+            campaignId: 'synthetic-scan-legacy-unstable',
+            status: 'completed',
+            campaignRawData: {},
+          },
+          recipients: legacyRecipients,
+          stability: {
+            updateTimeMs: counter,
+            leaseGeneration: null,
+            activeAttemptId: null,
+            resolutionLeaseAttemptId: null,
+          },
+        }
+      },
+    }
+    const deps = buildDeps([script])
+    const result = await runDrainAuditScan(deps, classifyCampaignForDrainAudit, NOW_MS)
+    expect(result.stable).toBe(false)
+    expect(result.results).toEqual([])
+  })
+})
+
+describe('summarizeDrainAuditResults（round 27 新增，Finding 1：CLI 彙總邏輯——SAFE 與 SAFE_WITH_WARNING 必須分開計數，且兩者都不阻擋部署）', () => {
+  const NOW_MS = 1_700_000_000_000
+
+  /** 用真正的 classifyCampaignForDrainAudit() 產生結果（不是手刻假物件），
+   *  確保這裡測的是跟 production 100% 相同的 CampaignDrainAuditResult
+   *  形狀。campaignId／收件人數量全部是合成值。 */
+  function classify(overrides: Partial<CampaignDrainAuditInput> = {}) {
+    const base: CampaignDrainAuditInput = {
+      campaignId: 'synthetic-summary-campaign',
+      status: 'sending',
+      recipientsReady: true,
+      activeAttemptId: undefined,
+      activeLeaseExpiresAtMs: undefined,
+      activeLeaseExpiresAtLegacy: undefined,
+      resolutionLeaseAttemptId: undefined,
+      resolutionLeaseExpiresAtMs: undefined,
+      leaseGeneration: 1,
+      createdByAttemptId: undefined,
+      startedAtMs: undefined,
+      startedAtLegacy: undefined,
+      // 提交前審查 Finding 1：不提供 campaignRawData——這個 describe 區塊的
+      // 「一般」情境（status:'sending'）不需要 legacy 例外，legacyWarningResult()
+      // 才會另外提供一個真正「什麼欄位都沒有」的 campaignRawData。
+      recipients: [],
+      ...overrides,
+    }
+    return classifyCampaignForDrainAudit(base, NOW_MS)
+  }
+
+  function legacyWarningResult(campaignId: string) {
+    const recipients: RecipientDrainSample[] = [
+      { status: 'sent', leaseExpiresAtMs: undefined, leaseExpiresAtLegacy: undefined },
+      { status: 'failed', leaseExpiresAtMs: undefined, leaseExpiresAtLegacy: undefined },
+    ]
+    return classify({
+      campaignId,
+      status: 'completed',
+      recipientsReady: undefined,
+      // 提交前審查 Finding 1：campaignRawData:{} 是真正「什麼欄位都沒有」
+      // 的原始物件——hasOwnProperty 對 recipientsReady／createdAt／
+      // updatedAt／completedAt 都回傳 false，才符合 isFieldAbsent() 判斷
+      // 的「完全缺席」語意，不是只靠這個 JS 測試物件沒設這幾個 key。
+      campaignRawData: {},
+      leaseGeneration: undefined,
+      recipients,
+    })
+  }
+
+  it('SAFE 與 SAFE_WITH_WARNING 分開計數，不會互相併吞', () => {
+    const safe = classify({ campaignId: 'c-safe' })
+    const warning = legacyWarningResult('c-warning')
+    expect(safe.classification).toBe('SAFE')
+    expect(warning.classification).toBe('SAFE_WITH_WARNING')
+
+    const { counts } = summarizeDrainAuditResults([safe, warning])
+    expect(counts.SAFE).toBe(1)
+    expect(counts.SAFE_WITH_WARNING).toBe(1)
+    expect(counts.ACTIVE).toBe(0)
+    expect(counts.UNKNOWN).toBe(0)
+    expect(counts.INDETERMINATE).toBe(0)
+    expect(counts.EXHAUSTED).toBe(0)
+  })
+
+  it('純 SAFE、純 SAFE_WITH_WARNING、兩者混合 → exitCode 都是 0，blocking 清單都是空的', () => {
+    const safe1 = classify({ campaignId: 'c-safe-1' })
+    const safe2 = classify({ campaignId: 'c-safe-2' })
+    const warning1 = legacyWarningResult('c-warning-1')
+    const warning2 = legacyWarningResult('c-warning-2')
+
+    for (const batch of [[safe1, safe2], [warning1, warning2], [safe1, warning1, safe2, warning2]]) {
+      const summary = summarizeDrainAuditResults(batch)
+      expect(summary.exitCode).toBe(0)
+      expect(summary.blocking).toEqual([])
+    }
+  })
+
+  it('一份 SAFE_WITH_WARNING 加上一份阻擋部署的 campaign（同一輪）→ exitCode 是 1，blocking 只包含真正阻擋的那一份', () => {
+    const warning = legacyWarningResult('c-warning')
+    const active = classify({
+      campaignId: 'c-active',
+      status: 'sending',
+      recipientsReady: true,
+      activeAttemptId: 'someone',
+      activeLeaseExpiresAtMs: NOW_MS + 60_000,
+    })
+    expect(active.classification).toBe('ACTIVE')
+
+    const summary = summarizeDrainAuditResults([warning, active])
+    expect(summary.exitCode).toBe(1)
+    expect(summary.blocking).toHaveLength(1)
+    expect(summary.blocking[0].campaignId).toBe('c-active')
+    expect(summary.warnings).toHaveLength(1)
+    expect(summary.warnings[0].campaignId).toBe('c-warning')
+  })
+
+  it('SAFE_WITH_WARNING 的原因說明字串存在、非空，且明確提到不要 backfill recipientsReady、不要執行 repair-status——供 CLI 輸出使用', () => {
+    expect(typeof LEGACY_COMPLETED_PARTIAL_WARNING_REASON).toBe('string')
+    expect(LEGACY_COMPLETED_PARTIAL_WARNING_REASON.length).toBeGreaterThan(0)
+    expect(LEGACY_COMPLETED_PARTIAL_WARNING_REASON).toContain('recipientsReady')
+    expect(LEGACY_COMPLETED_PARTIAL_WARNING_REASON).toContain('repair-status')
+  })
+
+  it('回傳的結果物件裡完全沒有收件人 email／姓名等個資欄位——這份彙總只處理 classifyCampaignForDrainAudit() 已經過 field mask 遮罩的結果，不會、也不能引入 PII', () => {
+    const warning = legacyWarningResult('c-warning')
+    const summary = summarizeDrainAuditResults([warning])
+    const serialized = JSON.stringify(summary)
+    expect(serialized).not.toMatch(/email/i)
+    expect(serialized).not.toMatch(/@.+\..+/) // 沒有任何看起來像 email 地址的字串
+    expect(serialized).not.toContain('name')
+  })
+
+  // round 27 新增：連線／掃描不穩定時的 exit code 2 行為屬於 main() 本身
+  // （scan.stable===false 時直接 process.exitCode=1？不——見 main() 原始碼：
+  // 這裡刻意重新確認一次，避免文件跟程式碼漂移）。main() 在 !scan.stable
+  // 時會在呼叫 summarizeDrainAuditResults() 之前就 return，這是既有（round
+  // 20）行為，這一輪完全沒有修改那一段，這裡只用程式碼本身的結構性事實
+  // （guard clause 先 return）佐證，不去重新實作一份 main() 的 mock——那樣
+  // 反而會製造一份容易漂移的複製品。exit code 2 的情境（缺 --project、
+  // 編譯產物過期、Firestore 連線失敗）完全不涉及 summarizeDrainAuditResults()，
+  // 本輪也沒有改動那幾段程式碼。
+  it('（文件性測試）scan 不穩定時 main() 在呼叫 summarizeDrainAuditResults() 之前就已經 return——這裡驗證的是 summarizeDrainAuditResults() 本身不會被空陣列以外的任何隱含假設絆倒，避免未來重構不小心讓它在不穩定掃描時被誤呼叫', () => {
+    const summary = summarizeDrainAuditResults([])
+    expect(summary).toEqual({
+      counts: { SAFE: 0, SAFE_WITH_WARNING: 0, ACTIVE: 0, UNKNOWN: 0, INDETERMINATE: 0, EXHAUSTED: 0 },
+      blocking: [],
+      warnings: [],
+      exitCode: 0,
+    })
+  })
+})
+
+describe('field mask 完整性（round 27 提交前審查 Finding 3）：SAFE_WITH_WARNING 的 legacy 例外需要的四個欄位必須真的被查詢——直接檢查 production 的 field-mask 常數本身，不在測試裡另外複製一份欄位清單', () => {
+  const REQUIRED_LEGACY_FIELDS = ['recipientsReady', 'createdAt', 'updatedAt', 'completedAt']
+
+  it('audit-campaign-drain.mjs 的 CAMPAIGN_FIELDS（唯一 export 的 field-mask 常數，main() 與 createDrainAuditDeps() 都用同一份）包含全部四個欄位', () => {
+    for (const field of REQUIRED_LEGACY_FIELDS) {
+      expect(CAMPAIGN_FIELDS).toContain(field)
+    }
+  })
+
+  it('ops-campaign-repair.mjs 的 CAMPAIGN_REPAIR_CLASSIFICATION_FIELDS（reconcile／repair-press-release 的 dry-run／confirm 共用的 field-mask 常數）也包含全部四個欄位——避免它跟 audit:drain 對同一份 campaign 算出不同的 classification', () => {
+    for (const field of REQUIRED_LEGACY_FIELDS) {
+      expect(CAMPAIGN_REPAIR_CLASSIFICATION_FIELDS).toContain(field)
+    }
   })
 })

@@ -106,6 +106,17 @@ export const CAMPAIGN_REPAIR_CLASSIFICATION_FIELDS = [
   'pressReleaseId',
   'isTest',
   'mode',
+  // round 27 新增（Finding 1）：這裡也會呼叫
+  // classifyCampaignForDrainAudit()（見下方 createClassificationLoader()），
+  // SAFE_WITH_WARNING 的「歷史 completed campaign」例外需要證明這三個欄位
+  // 完全不存在——跟 audit-campaign-drain.mjs 的 CAMPAIGN_FIELDS 同一個理由，
+  // 見 shared/campaignSend.ts 的 isLegacyCompletedPartialMismatchSafe()。
+  // 少了這三個欄位，這裡跟 audit:drain 對同一份 campaign 可能算出不同的
+  // classification（field mask 沒請求到的欄位一律讀成 undefined，會被誤判
+  // 成「真的缺席」），這是本輪需求文件明確要求的一致性。
+  'createdAt',
+  'updatedAt',
+  'completedAt',
 ]
 
 /** round 26 新增：--action repair-status 的 dry-run／confirm 都用這份
@@ -213,6 +224,10 @@ export function createClassificationLoader(campaignRef, { FieldPath, classifyCam
         createdByAttemptId: data.createdByAttemptId,
         startedAtMs: data.startedAtMs,
         startedAtLegacy: data.startedAt,
+        // round 27 修正（提交前審查 Finding 1）：見 audit-campaign-drain.mjs
+        // 對應位置的說明——SAFE_WITH_WARNING 的 legacy 例外需要原始物件本身
+        // 才能用 isFieldAbsent()／hasOwnProperty 判斷欄位是否完全不存在。
+        campaignRawData: data,
         recipients,
       },
       nowMs,
