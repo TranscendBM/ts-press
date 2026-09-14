@@ -106,6 +106,16 @@ export const CAMPAIGN_FIELDS = [
   'createdByAttemptId',
   'startedAtMs',
   'startedAt',
+  // round 27 新增（Finding 1）：SAFE_WITH_WARNING 的「歷史 completed
+  // campaign」例外（見 shared/campaignSend.ts 的
+  // isLegacyCompletedPartialMismatchSafe()）需要證明這三個欄位「完全
+  // 不存在」——field mask 沒有請求的欄位，讀回來一律是 undefined，會跟
+  // 「文件裡真的不存在這個欄位」無法區分，讓那個判斷式的絕對缺席檢查失去
+  // 意義。這三個欄位本身完全不含個資，一般分類邏輯（lease／setup／
+  // recipient）也不使用它們的值。
+  'createdAt',
+  'updatedAt',
+  'completedAt',
 ]
 export const STABILITY_FIELDS = ['leaseGeneration', 'activeAttemptId', 'resolutionLeaseAttemptId']
 
@@ -193,6 +203,12 @@ export function createDrainAuditDeps(db, { FieldPath }) {
               createdByAttemptId: data.createdByAttemptId,
               startedAtMs: data.startedAtMs,
               startedAtLegacy: data.startedAt,
+              // round 27 修正（提交前審查 Finding 1）：SAFE_WITH_WARNING 的
+              // legacy 例外需要用 hasOwnProperty 判斷「欄位完全不存在」，不能
+              // 只看個別欄位的值——直接把 field-masked 查回來的原始物件傳給
+              // classifyCampaignForDrainAudit()，讓它自己對 recipientsReady／
+              // createdAt／updatedAt／completedAt 做 isFieldAbsent() 判斷。
+              campaignRawData: data,
             },
             recipients,
             stability: stabilityFromSnap(campaignSnap),
@@ -202,6 +218,60 @@ export function createDrainAuditDeps(db, { FieldPath }) {
       )
     },
   }
+}
+
+/**
+ * round 27 新增（Finding 1）：SAFE_WITH_WARNING 專屬的人工可讀原因說明——
+ * CLI 輸出從這裡拿同一段文字，不要各自複製一份容易漂移的字串。內容明確
+ * 提醒操作員：這是已知、範圍極窄、經過逐項驗證的歷史資料落差，不阻擋部署，
+ * 但也不要嘗試「修好」它（見 shared/campaignSend.ts 的
+ * isLegacyCompletedPartialMismatchSafe() 與 round 26 decideCampaignStatusRepair()
+ * 的完整背景說明）。
+ */
+export const LEGACY_COMPLETED_PARTIAL_WARNING_REASON =
+  '歷史遺留的 completed campaign（這套 lease 機制部署之前建立，recipientsReady／' +
+  'createdAt／updatedAt／completedAt 四個欄位完全缺失）——宣稱的 completed 跟真實收件人' +
+  '分佈重新算出來的 partial 不一致，但沒有任何 owner／lease、也沒有任何未知或非終止的' +
+  '收件人，屬於已知、範圍極窄、經過逐項驗證的資料落差，不阻擋部署。' +
+  '⚠️ 不要把這個警告當成可以消音的雜訊，也不要嘗試「修好」它：不要 backfill ' +
+  'recipientsReady:true（會重新開放 retryCampaign 認領那些 failed 收件人，造成真正的' +
+  '重複寄送風險），也不要對這份 campaign 執行 repair-status --confirm（缺少 ' +
+  'recipientsReady 本來就會被那個工具拒絕成 not-ready，這裡只是提醒不要嘗試繞過）。' +
+  '這個警告應該持續留在稽核輸出裡供人工追蹤，不是一次性訊息。'
+
+/**
+ * round 27 新增（Finding 1）：純函式版本的彙總邏輯——輸入完整的
+ * classification 結果陣列，回傳依分類分組的計數、需要阻擋部署的清單
+ *（blocking）、SAFE_WITH_WARNING 的清單（warnings），以及最終 exit code。
+ * main() 印出報告與決定 exit code 都呼叫這裡，同時讓 CLI 層級的測試可以在
+ * 不連線 Firestore／emulator 的情況下驗證彙總與 exit code 邏輯，不必重新刻
+ * 一份「看起來很像」的計數程式碼（那樣兩邊一旦漂移，測試綠燈不代表
+ * production 是對的）。
+ *
+ * ⚠️ SAFE_WITH_WARNING 一律不阻擋部署（跟 SAFE 一樣，見
+ * shared/campaignSend.ts 的 isDrainAuditBlocking()），但絕對不會被併進
+ * `counts.SAFE`——呼叫端必須把兩者當成兩個獨立的數字印出來，不能讓操作員
+ * 誤以為「全部都是乾淨的 SAFE」。
+ *
+ * @param {import('../../shared/campaignSend').CampaignDrainAuditResult[]} results
+ */
+export function summarizeDrainAuditResults(results) {
+  const counts = {
+    SAFE: 0,
+    SAFE_WITH_WARNING: 0,
+    ACTIVE: 0,
+    UNKNOWN: 0,
+    INDETERMINATE: 0,
+    EXHAUSTED: 0,
+  }
+  for (const r of results) {
+    counts[r.classification] += 1
+  }
+  const blocking = results.filter(
+    (r) => r.classification !== 'SAFE' && r.classification !== 'SAFE_WITH_WARNING',
+  )
+  const warnings = results.filter((r) => r.classification === 'SAFE_WITH_WARNING')
+  return { counts, blocking, warnings, exitCode: blocking.length > 0 ? 1 : 0 }
 }
 
 function parseArgs(argv) {
@@ -295,13 +365,23 @@ async function main() {
   }
 
   const results = scan.results
-  const nonSafe = results.filter((r) => r.classification !== 'SAFE')
+  // round 27 修正（Finding 1）：彙總邏輯抽成獨立的 summarizeDrainAuditResults()
+  // ——`blocking` 才是「需要阻擋部署」的清單（SAFE／SAFE_WITH_WARNING 都不
+  // 在裡面），不能再用舊版 `classification !== 'SAFE'` 的寫法，那樣會把
+  // SAFE_WITH_WARNING 也算成需要阻擋。`counts` 把六種分類分開計數，
+  // SAFE_WITH_WARNING 絕對不會被併進 counts.SAFE。
+  const { counts, blocking, warnings, exitCode } = summarizeDrainAuditResults(results)
 
-  console.log(`共檢查 ${results.length} 份 campaign，${nonSafe.length} 份不是 SAFE。`)
-  if (nonSafe.length > 0) {
+  console.log(
+    `共檢查 ${results.length} 份 campaign：SAFE=${counts.SAFE}、` +
+      `SAFE_WITH_WARNING=${counts.SAFE_WITH_WARNING}、ACTIVE=${counts.ACTIVE}、` +
+      `UNKNOWN=${counts.UNKNOWN}、INDETERMINATE=${counts.INDETERMINATE}、` +
+      `EXHAUSTED=${counts.EXHAUSTED}（${blocking.length} 份需要阻擋部署）。`,
+  )
+  if (blocking.length > 0) {
     console.log('')
-    console.log('非 SAFE 的 campaign：')
-    for (const r of nonSafe) {
+    console.log('阻擋部署的 campaign（ACTIVE／UNKNOWN／INDETERMINATE／EXHAUSTED）：')
+    for (const r of blocking) {
       console.log(
         `- ${r.campaignId} | status=${r.status} | 分類=${r.classification} | ` +
           `setup phase=${r.setupPhase} | ` +
@@ -388,16 +468,36 @@ async function main() {
     console.log('')
   }
 
-  if (nonSafe.length > 0) {
-    console.error(
-      '部署必須阻擋：以上非 SAFE 的 campaign 需要先處理（見 functions/src/index.ts 頂部的部署 runbook）。',
+  // round 27 新增（Finding 1）：SAFE_WITH_WARNING 一律列印出來，即使不阻擋
+  // 部署——這是刻意的：這個分類代表「已知、範圍極窄的資料落差」，不是完全
+  // 乾淨的 SAFE，必須讓操作員每一次執行稽核都看得到，不能被消音，也不能
+  // 被沒收進上面的 SAFE 計數裡（見 LEGACY_COMPLETED_PARTIAL_WARNING_REASON
+  // 與 shared/campaignSend.ts 的完整背景說明）。
+  if (warnings.length > 0) {
+    console.log(
+      `【SAFE_WITH_WARNING】${warnings.length} 份 campaign 有已知、範圍極窄的資料落差，` +
+        '不阻擋部署，但需要持續留意（不是可以消音的雜訊）：',
     )
-    process.exitCode = 1
+    for (const r of warnings) {
+      console.log(`  - ${r.campaignId} | status=${r.status}`)
+      console.log(`    ⚠️ ${LEGACY_COMPLETED_PARTIAL_WARNING_REASON}`)
+    }
+    console.log('')
+  }
+
+  if (blocking.length > 0) {
+    console.error(
+      '部署必須阻擋：以上 ACTIVE／UNKNOWN／INDETERMINATE／EXHAUSTED 的 campaign 需要先處理' +
+        '（見 functions/src/index.ts 頂部的部署 runbook）。',
+    )
+    process.exitCode = exitCode
     return
   }
 
-  console.log('全部 campaign 都是 SAFE，可以安全部署。')
-  process.exitCode = 0
+  console.log(
+    `全部 campaign 都可以安全部署（SAFE=${counts.SAFE}、SAFE_WITH_WARNING=${counts.SAFE_WITH_WARNING}）。`,
+  )
+  process.exitCode = exitCode
 }
 
 // round 17 新增（Finding 2）：direct-execution guard——只有這支檔案被當成

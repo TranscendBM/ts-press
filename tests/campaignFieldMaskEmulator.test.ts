@@ -236,3 +236,80 @@ describe('round 25 修正：ops-campaign-repair.mjs 的 loadClassification（cre
     expect(after).toEqual(before)
   })
 })
+
+/**
+ * round 27 新增（Finding 1）：SAFE_WITH_WARNING 的「歷史 completed
+ * campaign」例外——用真實 Firestore emulator 驗證，走跟 production 100%
+ * 相同的程式碼路徑：createDrainAuditDeps()（含 CAMPAIGN_FIELDS field
+ * mask）＋ runDrainAuditScan()（含穩定快照協定）＋
+ * classifyCampaignForDrainAudit()（見 shared/campaignSend.ts 的
+ * isLegacyCompletedPartialMismatchSafe()）。
+ *
+ * ⚠️ 這裡驗證的核心是 Part 2 的完整性：`recipientsReady`／`createdAt`／
+ * `updatedAt`／`completedAt` 這三個欄位如果真的完全不存在於文件裡，且
+ * field mask（CAMPAIGN_FIELDS）有把它們納入查詢，稽核工具讀到的值必須是
+ * 「真的缺席」（undefined），不是被 field mask 篩掉才看起來像缺席——只有
+ * 這樣，isLegacyCompletedPartialMismatchSafe() 的絕對缺席判斷才有意義。
+ *
+ * campaignId／收件人人數全部是合成值，跟真實 production 資料無關。
+ */
+describe('round 27 新增：SAFE_WITH_WARNING 的 legacy completed campaign 例外（createDrainAuditDeps + runDrainAuditScan，真實 emulator）', () => {
+  let app: unknown
+  let db: FirebaseFirestore.Firestore
+
+  beforeAll(() => {
+    ;({ app, db } = createEmulatorFirestoreApp('ts-press-audit-safe-with-warning'))
+  })
+  afterAll(async () => deleteEmulatorFirestoreApp(app))
+
+  it('legacy 形狀（recipientsReady／createdAt／updatedAt／completedAt 完全不存在於文件裡，無任何 owner，收件人只有 sent／failed）→ 掃描穩定成功，分類為 SAFE_WITH_WARNING', async () => {
+    const id = `legacy-safe-with-warning-${randomUUID()}`
+    const campaignRef = db.collection('campaigns').doc(id)
+    // 刻意只寫入 status 與 leaseGeneration（模擬這套 lease 機制部署之前的
+    // 舊 schema）——recipientsReady／createdAt／updatedAt／completedAt／
+    // activeAttemptId／resolutionLeaseAttemptId／createdByAttemptId 全部
+    // 不設定，文件裡真的沒有這些鍵，不是設成 null／false。
+    await campaignRef.set({
+      status: 'completed',
+      leaseGeneration: 0,
+      contactEmail: 'should-not-be-read@example.com',
+    })
+    await campaignRef.collection('recipients').doc('r1').set({ status: 'sent' })
+    await campaignRef.collection('recipients').doc('r2').set({ status: 'sent' })
+    await campaignRef.collection('recipients').doc('r3').set({ status: 'failed' })
+
+    const deps = createDrainAuditDeps(db, { FieldPath })
+    const nowMs = Date.now()
+    const scan = await runDrainAuditScan(deps, classifyCampaignForDrainAudit, nowMs)
+
+    expect(scan.stable).toBe(true)
+    const ours = scan.results.find((r) => r.campaignId === id)
+    expect(ours).toBeDefined()
+    expect(ours!.classification).toBe('SAFE_WITH_WARNING')
+    expect(ours!.legacyCompletedPartialMismatchWaived).toBe(true)
+    expect(ours!.recipientDistributionConsistent).toBe(false)
+  })
+
+  it('姊妹案例：recipientsReady 明確寫成 false（不是缺席）→ 不會被當成 legacy 例外，維持 INDETERMINATE，不是 SAFE_WITH_WARNING', async () => {
+    const id = `legacy-recipients-ready-false-${randomUUID()}`
+    const campaignRef = db.collection('campaigns').doc(id)
+    await campaignRef.set({
+      status: 'completed',
+      recipientsReady: false,
+      leaseGeneration: 0,
+    })
+    await campaignRef.collection('recipients').doc('r1').set({ status: 'sent' })
+    await campaignRef.collection('recipients').doc('r2').set({ status: 'failed' })
+
+    const deps = createDrainAuditDeps(db, { FieldPath })
+    const nowMs = Date.now()
+    const scan = await runDrainAuditScan(deps, classifyCampaignForDrainAudit, nowMs)
+
+    expect(scan.stable).toBe(true)
+    const ours = scan.results.find((r) => r.campaignId === id)
+    expect(ours).toBeDefined()
+    expect(ours!.classification).not.toBe('SAFE_WITH_WARNING')
+    expect(ours!.classification).toBe('INDETERMINATE')
+    expect(ours!.legacyCompletedPartialMismatchWaived).toBe(false)
+  })
+})

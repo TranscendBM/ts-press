@@ -651,6 +651,37 @@ interface CampaignEmailSettings {
 //         SAFE——只代表「setup 逾時了」，不代表沒有舊 revision 卡住還在
 //         寫入；必須先透過 reclaimAbandonedSetupTx 認領或人工確認實際
 //         狀態，才能繼續部署。
+//   (f) round 27 新增（Finding 1）：SAFE_WITH_WARNING——`classifyCampaignForDrainAudit()`
+//       的分類新增這個值，意思是「可以安全部署」，但**不代表**「這份
+//       campaign 的歷史資料完全自我一致」。目前唯一會產生這個分類的情境
+//      （見 shared/campaignSend.ts 的 isLegacyCompletedPartialMismatchSafe()
+//       完整說明）：這套 lease 機制部署之前建立的歷史 completed campaign，
+//      `recipientsReady`／`createdAt`／`updatedAt`／`completedAt` 四個欄位
+//       完全缺失（不是 false，是欄位本身不存在），沒有任何 owner／lease，
+//       收件人真實分佈也完全乾淨（只有 sent／failed），唯一的異常訊號是
+//       宣稱的 completed 跟真實分佈重新算出來的 partial 不一致——(0) 原本
+//       會把這個落差判成 INDETERMINATE，這裡逐項驗證過整個情境是「已知、
+//       範圍極窄、不會再造成任何實際影響」之後才降級。
+//       - ⚠️ 這份 campaign 必須維持 `status:'completed'`，**不要**
+//         backfill `recipientsReady:true`：目前缺失的 recipientsReady 正是
+//         `decideAcquireCampaignLease()`（見 shared/campaignSend.ts）擋下
+//        `retryCampaign` 認領那些 failed 收件人的唯一原因；一旦補上
+//        `true`，`status:'partial'` 會變成合法可重試的狀態，那些 failed
+//         收件人就會被重新認領、真的寄出去——這是 round 26 決定「不修改
+//         這份文件的 status」的根本理由，SAFE_WITH_WARNING 延續同一個決定，
+//         只是讓稽核工具自己認得出這個形狀，不是改變這個決定。
+//       - ⚠️ **不要**對這份 campaign 執行 `repair-status --confirm`（round
+//         26 新增，見 shared/campaignSend.ts 的 decideCampaignStatusRepair()）
+//        ——那支工具本來就會因為 recipientsReady 缺失而回報 `not-ready`
+//         拒絕執行，這裡只是把「不要嘗試繞過」講清楚，不要因為 SAFE_WITH_WARNING
+//         看起來「已經被稽核工具認可了」就覺得可以順便修一修。
+//       - 這個警告必須留在稽核輸出裡持續可見，供人工複核——**不要**把它
+//         當成雜訊消音、也不要把它跟 SAFE 混在一起計數（見
+//         functions/scripts/audit-campaign-drain.mjs 的
+//         summarizeDrainAuditResults()：SAFE 與 SAFE_WITH_WARNING 永遠是
+//         兩個獨立的數字）。如果未來又出現其他形狀的 SAFE_WITH_WARNING
+//         情境，必須各自新增獨立、逐項驗證過的判斷式，不能放寬現有這一個
+//         的條件去「順便」涵蓋。
 //
 // 【稽核指令】對所有 campaign 套用【淨空判斷標準】，唯一推薦的指令
 //（round 16 修正，Finding 6：不要直接執行 node scripts/audit-campaign-drain.mjs，
@@ -788,7 +819,9 @@ interface CampaignEmailSettings {
 //    持續寫入的來源（通常代表步驟 1 的暫停視窗還不完整），不能重跑幾次
 //    稽核工具就當作「大概率沒問題」。
 //    任何一份文件落在 INDETERMINATE／ACTIVE／UNKNOWN／EXHAUSTED，都不得
-//    部署；
+//    部署；SAFE_WITH_WARNING（round 27 新增，見上面 (f) 的完整說明）**可以**
+//    部署，但稽核輸出裡的警告訊息必須留給操作員持續留意，不能因為「反正
+//    可以部署」就忽略或消音那則訊息；
 //    - ACTIVE：等待它自然完成或過期，不強行介入。
 //    - UNKNOWN：呼叫 reconcileCampaignDeliveryStatus（production 已部署
 //      過的情況——這是一般情況）；如果這是第一次部署（production 還沒有
@@ -2595,6 +2628,11 @@ async function classifyCampaignForReconciliationGate(campaignRef: FirebaseFirest
       createdByAttemptId: data.createdByAttemptId,
       startedAtMs: data.startedAtMs,
       startedAtLegacy: data.startedAt,
+      // round 27 修正（提交前審查 Finding 1）：SAFE_WITH_WARNING 的 legacy
+      // 例外需要用 hasOwnProperty 判斷 recipientsReady／createdAt／
+      // updatedAt／completedAt 是否完全不存在，不能只看個別欄位的值——這裡
+      // 是整份文件讀取（沒有 field mask），直接把整個 data 物件傳過去即可。
+      campaignRawData: data,
       recipients,
     },
     Date.now(),
