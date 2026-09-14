@@ -27,6 +27,13 @@ export default defineConfig({
       // repairCampaignStatusTx）的真實 Firestore transaction 整合測試，
       // 同樣需要 firebase-admin，同樣的理由必須透過 `npm run test:rules` 執行。
       'tests/campaignStatusRepairEmulator.test.ts',
+      // round 28 新增：system/runtime 維護旗標——Admin SDK 讀寫繞過規則的
+      // 具體示範、ops-maintenance.mjs 的 transaction 行為、六個受管制
+      // callable 的維護模式攔截，皆需要真正的 Firestore emulator，同樣的
+      // 理由必須透過 `npm run test:rules` 執行。
+      'tests/systemRuntimeAdminEmulator.test.ts',
+      'tests/opsMaintenanceEmulator.test.ts',
+      'tests/maintenanceCallableGate.test.ts',
     ],
     // 這幾個檔案各自對本機模擬器呼叫 initializeTestEnvironment() 部署自己
     // 的一套 Storage 規則。Storage 模擬器（不像 Firestore）在多個測試檔

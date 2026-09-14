@@ -20,6 +20,7 @@ const FILES = [
   ['permissions.ts', 'permissions.generated.ts'],
   ['pressCleanup.ts', 'pressCleanup.generated.ts'],
   ['campaignSend.ts', 'campaignSend.generated.ts'],
+  ['maintenance.ts', 'maintenance.generated.ts'],
 ]
 
 mkdirSync(outDir, { recursive: true })
