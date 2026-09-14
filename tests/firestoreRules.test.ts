@@ -818,3 +818,90 @@ describe('firestore.rules — 動態權限矩陣（mediaContacts / mediaEvents /
     })
   })
 })
+
+/**
+ * round 28 新增：system/runtime（活動操作維護模式旗標，campaignOperationsPaused
+ * ——見 shared/maintenance.ts 與 firestore.rules 對應 match 區塊的說明）。
+ *
+ * 這份文件唯一的讀者／寫入者是 Cloud Functions 自己的 Admin SDK（六個受
+ * 管制的 callable 讀取；functions/scripts/ops-maintenance.mjs CLI 寫入）——
+ * 跟 settings/smtp（admin 可讀）不同，這裡刻意連 admin 角色的 client 都要
+ * 被拒絕，證明的重點正是「這份文件比 settings/smtp 更嚴格：沒有任何
+ * client 角色被允許」。
+ *
+ * ⚠️ Admin SDK 完全不受這份 firestore.rules 檔案約束——這是 Firestore
+ * 本身的設計（安全規則只套用在透過 client SDK／REST 的請求，Admin SDK
+ * 走的是完全不同、以服務帳號為信任基礎的路徑），不是這份規則檔案「碰巧
+ * 沒擋到」。這件事沒有辦法用「規則測試」證明（規則測試驗證的正是規則
+ * 本身的行為，Admin SDK 從頭到尾不會觸發規則引擎，沒有規則結果可以斷言），
+ * 所以這裡不假裝寫一個「證明規則擋不住 Admin SDK」的測試——那樣的測試
+ * 只是同義反覆，不具意義。真正有意義、也確實可以驗證的是：透過
+ * functions/scripts/emulator-test-support.mjs 的 createEmulatorFirestoreApp()
+ * 走 Admin SDK 對同一個 emulator 讀寫 system/runtime 確實成功——見
+ * tests/systemRuntimeAdminEmulator.test.ts，那裡具體示範 Admin SDK 存取
+ * 完全不受這裡任何一條 rules 影響。
+ */
+describe('firestore.rules — system/runtime（活動操作維護模式旗標，只有 Cloud Functions Admin SDK 能讀寫）', () => {
+  let env: RulesTestEnvironment
+
+  beforeAll(async () => {
+    env = await initializeTestEnvironment({
+      projectId: 'ts-press-fs-rules-system-runtime',
+      firestore: {
+        rules: readFileSync('firestore.rules', 'utf8'),
+        host: HOST,
+        port: PORT,
+      },
+    })
+  })
+
+  afterAll(async () => env?.cleanup())
+
+  beforeEach(async () => {
+    await env.clearFirestore()
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore()
+      await setDoc(doc(db, 'users', 'admin@x.com'), {
+        email: 'admin@x.com',
+        role: 'admin',
+        active: true,
+      })
+      await setDoc(doc(db, 'users', 'spec@x.com'), {
+        email: 'spec@x.com',
+        role: 'specialist',
+        active: true,
+      })
+    })
+  })
+
+  function as(email: string): Firestore {
+    return env
+      .authenticatedContext(email, { email, email_verified: true })
+      .firestore()
+  }
+  const anon = () => env.unauthenticatedContext().firestore()
+  const ref = (db: Firestore) => doc(db, 'system', 'runtime')
+
+  it('未登入：讀取與寫入都被拒絕', async () => {
+    await assertFails(getDoc(ref(anon())))
+    await assertFails(setDoc(ref(anon()), { campaignOperationsPaused: true }))
+  })
+
+  it('一般白名單使用者（非 admin）：讀取與寫入都被拒絕', async () => {
+    await assertFails(getDoc(ref(as('spec@x.com'))))
+    await assertFails(setDoc(ref(as('spec@x.com')), { campaignOperationsPaused: true }))
+  })
+
+  it('admin 角色：讀取與寫入同樣都被拒絕——跟 settings/smtp（admin 可讀）刻意不同，' +
+    '這份文件對任何 client 角色一律不開放，只有 Cloud Functions 的 Admin SDK 能碰它', async () => {
+    await assertFails(getDoc(ref(as('admin@x.com'))))
+    await assertFails(setDoc(ref(as('admin@x.com')), { campaignOperationsPaused: true }))
+  })
+
+  it('admin 角色：即使文件已經被 Admin SDK（這裡用 withSecurityRulesDisabled 模擬）寫入過，仍然讀不到——不是「文件不存在才拒絕」', async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'system', 'runtime'), { campaignOperationsPaused: true })
+    })
+    await assertFails(getDoc(ref(as('admin@x.com'))))
+  })
+})

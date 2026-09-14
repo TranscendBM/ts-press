@@ -2,7 +2,7 @@ import { initializeApp } from 'firebase-admin/app'
 import { getAuth } from 'firebase-admin/auth'
 import { FieldValue, getFirestore, Timestamp } from 'firebase-admin/firestore'
 import { getStorage } from 'firebase-admin/storage'
-import { onCall, HttpsError } from 'firebase-functions/v2/https'
+import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https'
 import { onDocumentWritten } from 'firebase-functions/v2/firestore'
 import { defineSecret } from 'firebase-functions/params'
 import { setGlobalOptions } from 'firebase-functions/v2'
@@ -73,6 +73,7 @@ import {
   RECIPIENTS_SETUP_STALE_MS,
   RESOLUTION_LEASE_MS,
   resolveCampaignResume,
+  resolveCampaignSendKind,
   runSendPhase,
   SEND_BATCH_LIMIT,
   selectRecipientsToProcess,
@@ -93,6 +94,13 @@ import {
   type FinalizeCampaignWithPressReleaseDecision,
   type ReconcileCampaignDeliveryDeps,
 } from './campaignSend.generated'
+import {
+  isCampaignOperationsPaused,
+  MAINTENANCE_DOC_PATH,
+  MAINTENANCE_PAUSED_FIELD,
+  MAINTENANCE_PAUSED_MESSAGE,
+  type MaintenanceFlagReadOutcome,
+} from './maintenance.generated'
 
 interface AuthorizedUser {
   email: string
@@ -336,6 +344,25 @@ async function requirePermission(
   read: PermissionsReader = firestorePermissionsReader,
 ): Promise<AuthorizedUser> {
   const user = await authorize(auth, false)
+  await enforcePermission(user, permission, read)
+  return user
+}
+
+/**
+ * round 28 新增：從 requirePermission() 抽出「已經知道是誰了，檢查這個角色
+ * 能不能做這件事」的部分——單獨抽出來是因為 retryCampaignHandler 需要先
+ * 用 authorize() 確認呼叫者身分，再讀 campaign 文件決定 sendReal／
+ * sendTest 要用哪一種權限，最後才檢查權限矩陣，中間夾著一次跟權限判斷
+ * 無關的 Firestore 讀取（見 retryCampaignHandler 對應位置的說明），沒辦法
+ * 直接呼叫一次到底的 requirePermission()。這裡不是重刻一份權限矩陣
+ * 邏輯，是 requirePermission() 本來就有的同一段程式碼搬出來共用，
+ * requirePermission() 改成呼叫這個函式，兩者永遠不會漂移。
+ */
+async function enforcePermission(
+  user: AuthorizedUser,
+  permission: Permission,
+  read: PermissionsReader = firestorePermissionsReader,
+): Promise<void> {
   const decision = await checkPermission(user.role, permission, read)
   if (!decision.allowed) {
     logger.warn('權限不足', {
@@ -349,7 +376,6 @@ async function requirePermission(
       describeDecision(decision, permission),
     )
   }
-  return user
 }
 
 /** 只有 admin 能修改系統設定。 */
@@ -359,6 +385,50 @@ async function requireAdmin(auth: CallableAuth): Promise<AuthorizedUser> {
     throw new HttpsError('permission-denied', '只有管理員可以執行這個動作。')
   }
   return user
+}
+
+/**
+ * 讀取 system/runtime 的維護旗標——見 shared/maintenance.ts 開頭的完整背景
+ * 說明（部署 runbook【正式部署程序】步驟 1 的伺服器端強制維護窗）。
+ *
+ * 刻意每次都重新 `db.doc(...).get()`，不做任何快取／memoization、也不用
+ * 模組層級變數保存上一次讀到的值——維護旗標存在的唯一目的就是「維運人員
+ * 隨時切換之後，下一次呼叫立刻生效」，任何形式的快取都會讓「已經切換」與
+ * 「這個 Function instance 何時真正感知到」之間出現一段不確定的延遲，
+ * 違背這個機制本身的設計目的。這裡的讀取成本（一次 Firestore 文件讀取）
+ * 遠低於這六個 callable 本來就會做的其他 Firestore 操作，不需要為了效能
+ * 犧牲「立即生效」這個保證。
+ */
+async function readMaintenanceFlag(): Promise<MaintenanceFlagReadOutcome> {
+  try {
+    const snap = await db.doc(MAINTENANCE_DOC_PATH).get()
+    return {
+      kind: 'read-ok',
+      exists: snap.exists,
+      rawValue: snap.exists ? snap.data()?.[MAINTENANCE_PAUSED_FIELD] : undefined,
+    }
+  } catch {
+    return { kind: 'read-error' }
+  }
+}
+
+/**
+ * 六個受管制 callable 共用的維護模式檢查——一律緊接在既有的
+ * requirePermission／requireAdmin 之後、且必須是該次呼叫「第一個」有副
+ * 作用之前的檢查（不做任何 Firestore campaign／recipient 讀寫、不取得
+ * 任何租約、不讀 SMTP 設定或建立連線、不動 Storage、不動
+ * storageCleanupQueue）。見 shared/maintenance.ts 的
+ * isCampaignOperationsPaused()：任何無法確定的情況（讀取失敗、旗標格式
+ * 不合法）都視為「維護中」，fail closed。
+ *
+ * 拋出的訊息刻意通用（MAINTENANCE_PAUSED_MESSAGE）——不透露是哪一個
+ * campaign、哪一位操作者、旗標文件本身的路徑或欄位名稱。
+ */
+async function requireCampaignOperationsNotPaused(): Promise<void> {
+  const read = await readMaintenanceFlag()
+  if (isCampaignOperationsPaused(read)) {
+    throw new HttpsError('failed-precondition', MAINTENANCE_PAUSED_MESSAGE)
+  }
 }
 
 /**
@@ -798,16 +868,86 @@ interface CampaignEmailSettings {
 //    新的請求進來。正確做法是同時具備：
 //    (a) 前端暫停新的正式／測試發送與人工 delivery_unknown 處理（維持
 //        原有的使用者體驗，避免誤觸）；
-//    (b) 伺服器端強制的維護旗標——這些 callable 一開始就先檢查一個獨立的
-//        維護狀態文件／設定（不是靠 campaign 本身的欄位），維護模式開啟時
-//        直接拒絕請求，不進入任何 acquire lease 的邏輯。這道檢查必須在
-//        admin SDK／Cloud Functions 這一層執行，不能只放在前端，才能真正
-//        擋下「有權限但繞過前端」的呼叫與飛行中的舊 request。
-//    本輪（round 20）只新增稽核工具本身「掃描期間資料變動即 fail closed」
-//    的偵測能力（見下方步驟 2），**沒有**實作 (b) 的伺服器端維護旗標——
-//    這是目前程式碼裡仍然缺少、但 runbook 明確要求補上的部分，見本輪報告
-//    第 9 節「未解決風險」。在補上 (b) 之前，這段暫停視窗的保證僅止於
-//   「正常操作流程不會發出新請求」，不是「伺服器保證沒有任何請求會被接受」。
+//    (b) 伺服器端強制的維護旗標——round 28 新增：已經實作。Firestore
+//        文件 system/runtime 的 campaignOperationsPaused 欄位（見
+//        shared/maintenance.ts 的完整判斷邏輯）由
+//        sendCampaign／retryCampaign／resolveDeliveryUnknown／
+//        reconcileCampaignDeliveryStatus／testSmtpConnection／
+//        processStorageCleanupQueue 這六個 callable 各自的 handler
+//       （sendCampaignHandler 等，見各自定義處）在既有的
+//        requirePermission／requireAdmin 通過之後、在做任何其他事情之前
+//        呼叫 requireCampaignOperationsNotPaused()：一旦判定為暫停中，
+//        直接以 HttpsError('failed-precondition', MAINTENANCE_PAUSED_MESSAGE)
+//        拒絕，不會進入任何 Firestore campaign／recipient 讀寫、不會
+//        acquire 任何租約、不會讀取或連線 SMTP、不會動 Storage 或
+//        storageCleanupQueue。管理員透過
+//        `npm run ops:maintenance -- --project <id> --action enable|disable
+//        --confirm <同一個 action>` 這支 CLI 切換旗標（見
+//        functions/scripts/ops-maintenance.mjs），不透過任何 callable 或
+//        前端介面寫入這份文件——client 端（含 admin）完全被 firestore.rules
+//        擋下（`match /system/runtime` 一律 `allow read, write: if false`），
+//        只有 Cloud Functions 的 Admin SDK 能讀寫。
+//    ⚠️ 誠實的限制——這個機制解決的是「新的呼叫」，不是全部競態：
+//    - 不會中止一個「在旗標被翻成暫停之前」就已經通過
+//      requireCampaignOperationsNotPaused() 檢查的飛行中 invocation——它
+//      在檢查當下讀到的是暫停生效前的狀態，之後會照常繼續執行到完成，
+//      這個機制只擋「檢查當下旗標讀到暫停」的新呼叫。
+//    - 因此，把旗標切成 enabled 之後，操作人員仍然必須至少等待
+//      CAMPAIGN_LEASE_MS（660,000 毫秒／11 分鐘）才能把系統視為真正淨空
+//      ——一個在翻旗標前一刻才通過檢查的 invocation，仍然可能在切換後
+//      的這段時間內合法取得／持有處理租約，不會被這個旗標追殺回來。
+//    - 這個功能第一次部署時，正在服務流量的「舊版」function revision
+//      完全不認識這個旗標（它們執行的是還沒有 requireCampaignOperationsNotPaused()
+//      呼叫的舊程式碼）——把旗標設成 true 對還在跑的舊 revision 沒有
+//      任何效果，必須等到新版 revision 完全取代舊版才會生效。
+//    - 因此這個功能「第一次」上線時，仍然必須沿用下面完整的手動暫停
+//      視窗流程，不能只因為「程式碼裡已經有維護旗標」就跳過——這個功能
+//      本身要解決的正是「舊 revision 不認得旗標」這件事，所以它自己的
+//      首次部署反而最不能依賴它自己：
+//      (1) 人工暫停：先在前端把正式／測試發送與人工 resolution 的入口
+//          暫停（維持原有的使用者體驗，避免誤觸），這個步驟本身不依賴
+//          維護旗標（此時舊 revision 根本還不認得這個旗標）。
+//      (2) 用 `npm run ops:maintenance -- --project <id> --action enable
+//          --confirm enable` 把正式旗標設成 true——這個步驟此時對還在
+//          服務流量的舊 revision 沒有任何效果（見上面的誠實限制），純粹
+//          是先把狀態準備好，讓「新版 revision 一上線就立刻生效」。
+//      (3) 用 `npm run ops:maintenance -- --project <id> --action status`
+//          明確驗證輸出顯示 campaignOperationsPaused = true，確認上一步
+//          真的寫入成功，不要只憑印象假設已經切換。
+//      (4) 部署 Firestore Rules（`firebase deploy --only firestore:rules`）
+//          ——這一輪新增了 `match /system/runtime` 的 `allow read, write:
+//          if false`，雖然 Firestore 對任何未宣告的路徑本來就預設拒絕
+//          （所以就算漏了這步也不會立刻造成 client 端可以讀寫這份文件的
+//          安全漏洞），仍然必須明確部署，讓正式環境的規則檔案與目前程式
+//          碼版本保持一致，不要留下「規則檔案跟程式碼對不上」的技術債。
+//      (5) 部署 Functions（`firebase deploy --only functions`）——新版
+//          revision 開始逐步取代舊版，從這一刻起，新 revision 收到的請求
+//          才會真的檢查這個旗標；舊 revision 仍可能繼續服務部分流量直到
+//          完全被取代。
+//      (6) 部署完成後，維持步驟 (1) 的人工暫停狀態，至少等待
+//          CAMPAIGN_LEASE_MS（660,000 毫秒／11 分鐘），讓舊 revision／
+//          在切換前一刻就已經通過檢查的飛行中 invocation 完全結束或被
+//          強制終止——不能因為「旗標已經是 true」就提前跳過這段等待。
+//      (7) 重新執行 `npm run audit:drain` 稽核。
+//      (8) 只有稽核顯示全部 campaign 都是 SAFE／SAFE_WITH_WARNING，才
+//          可以繼續下一步；只要出現任何 ACTIVE／UNKNOWN／INDETERMINATE／
+//          EXHAUSTED，先照上面步驟 2 的既有處理方式排除，回到步驟 (7)
+//          重新稽核，不能跳過。
+//      (9) 部署 Hosting（`firebase deploy --only hosting`）。
+//      (10) 部署後做不會真的寄信的 smoke checks（例如確認頁面能正常載入、
+//           callable 能正常回應維護中的 failed-precondition 訊息），確認
+//           新版程式碼本身沒有其他問題——這個步驟旗標仍然是 true，任何
+//           smoke check 都不應該、也不可能真的觸發寄送。
+//      (11) 取得明確授權後，才用 CLI 把旗標設回 false（`--action disable
+//           --confirm disable`）——不能因為「部署看起來順利」就自行決定
+//           解除維護模式，必須是另一個明確的人工決策點。
+//      (12) 再次用 `--action status` 驗證輸出顯示
+//           campaignOperationsPaused = false，確認真的解除成功。
+//      (13) 最後才恢復步驟 (1) 暫停的前端操作，回到正常運作狀態。
+//    - 這個旗標**絕對不會**、也不應該被理解成「瞬間取消所有競態」的
+//      保證——它只是把「新請求」這一類風險關掉，上面列的每一種限制都
+//      必須被操作人員理解並照著流程操作，不能假設有了這個旗標就可以
+//      省略暫停視窗與 drain 等待。
 // 2. 確認淨空：執行上面的【稽核指令】。round 20 修正（Finding 2）：稽核
 //    工具本身現在會對每一份 campaign 用 read-only transaction 同時讀
 //    campaign 文件與其 recipients 查詢（保證兩者是同一個時間點的快照），
@@ -1706,9 +1846,15 @@ async function buildRecipientPlan(opts: {
 // 卻可能忘記同步更新的版本）。sendCampaign／retryCampaign 都呼叫
 // resolveCampaignResume(existing, request, Date.now())。
 
-export const sendCampaign = onCall<SendRequest>(
-  { secrets: [SMTP_PASS], timeoutSeconds: CAMPAIGN_FUNCTION_TIMEOUT_MS / 1000, memory: '512MiB' },
-  async (request) => {
+/**
+ * round 28 新增：抽成獨立具名、獨立 export 的 handler，讓測試可以直接建構
+ * 一個最小的 CallableRequest 呼叫這個函式本身，不必透過完整的 Cloud
+ * Functions v2 onCall wrapper（不需要真的模擬 HTTPS 呼叫、也不受它的
+ * request 驗證框架限制）——純粹是抽出函式，邏輯與 onCall 直接內聯一份
+ * handler 完全相同，見下方 `sendCampaign` 只是把這個函式當成 handler
+ * 傳給 onCall()。
+ */
+export async function sendCampaignHandler(request: CallableRequest<SendRequest>) {
     const { pressReleaseId, targetLists, mode, idempotencyKey } =
       request.data ?? {}
     if (!pressReleaseId) {
@@ -1724,6 +1870,12 @@ export const sendCampaign = onCall<SendRequest>(
       request.auth,
       mode === 'real' ? 'sendReal' : 'sendTest',
     )
+
+    // round 28 新增：活動操作維護模式——見 functions/src/index.ts 頂部部署
+    // runbook【正式部署程序】步驟 1(b) 與 shared/maintenance.ts 的完整
+    // 說明。必須緊接在權限檢查之後、在任何 Firestore campaign 讀寫、租約
+    // 認領或 SMTP 相關動作之前。
+    await requireCampaignOperationsNotPaused()
 
     const pressSnap = await db
       .collection('pressReleases')
@@ -2019,7 +2171,11 @@ export const sendCampaign = onCall<SendRequest>(
     }
 
     return { campaignId: campaignRef.id, recipients: recipientsCount, status }
-  },
+}
+
+export const sendCampaign = onCall<SendRequest>(
+  { secrets: [SMTP_PASS], timeoutSeconds: CAMPAIGN_FUNCTION_TIMEOUT_MS / 1000, memory: '512MiB' },
+  sendCampaignHandler,
 )
 
 /**
@@ -2029,20 +2185,35 @@ export const sendCampaign = onCall<SendRequest>(
  * 用途：sendCampaign 因為撞到 SEND_BATCH_LIMIT 而提早停下（partial），
  * 或某次呼叫中途中斷、卡在 sending 太久，都可以呼叫這支繼續寄完。
  */
-export const retryCampaign = onCall<{ campaignId: string }>(
-  { secrets: [SMTP_PASS], timeoutSeconds: CAMPAIGN_FUNCTION_TIMEOUT_MS / 1000, memory: '512MiB' },
-  async (request) => {
+/** round 28 新增：抽成獨立具名、獨立 export 的 handler，理由與
+ *  sendCampaignHandler 相同——見該處的說明。 */
+export async function retryCampaignHandler(request: CallableRequest<{ campaignId: string }>) {
     const campaignId = request.data?.campaignId
     if (!campaignId || typeof campaignId !== 'string' || campaignId.includes('/')) {
       throw new HttpsError('invalid-argument', 'campaign ID 不正確。')
     }
+
+    // round 28 修正（提交前審查發現）：先確認呼叫者已登入且帳號本身有效，
+    // 再讀 campaign 文件——舊版在這裡先讀 campaign（因為要用
+    // campaign.mode 決定該檢查 sendReal 還是 sendTest），導致完全未登入
+    // 的呼叫者也會觸發一次 Firestore 讀取，且「campaign 不存在」
+    // （not-found）跟「campaign 存在但後面會被權限擋下」
+    // （permission-denied）是兩種可分辨的錯誤，形成不需要任何身分驗證就能
+    // 探測任意 campaign ID 是否存在的 oracle。authorize(auth, false) 只做
+    // 「這是不是一個已知、啟用中的使用者」的判斷，不需要先知道
+    // campaign.mode，可以安全地搬到讀 campaign 之前，不影響最終允不允許
+    // 這個操作的權限語意——sendReal／sendTest 的實際判斷仍然要等到下面讀出
+    // campaign.mode 之後才能決定，並透過 enforcePermission()（與
+    // requirePermission() 共用同一段權限矩陣判斷邏輯，見該處說明）完成。
+    const user = await authorize(request.auth, false)
 
     const campaignRef = db.collection('campaigns').doc(campaignId)
     const snap = await campaignRef.get()
     if (!snap.exists) {
       throw new HttpsError('not-found', '找不到這筆發送紀錄。')
     }
-    const campaign = snap.data() as {
+    const rawCampaignData = snap.data()
+    const campaign = rawCampaignData as {
       pressReleaseId: string
       mode: SendMode
       isTest: boolean
@@ -2054,11 +2225,44 @@ export const retryCampaign = onCall<{ campaignId: string }>(
       activeAttemptId?: string | null
     }
 
-    // 與 sendCampaign 相同的權限分野：正式發送要 sendReal，測試類要 sendTest
-    await requirePermission(
-      request.auth,
-      campaign.mode === 'real' ? 'sendReal' : 'sendTest',
-    )
+    // round 28 修正（提交前審查發現）：campaign.mode 畸形時，舊版用三元
+    // 運算式 `campaign.mode === 'real' ? 'sendReal' : 'sendTest'` 隱含
+    // fallback 到 sendTest——任何非 'real' 的值（undefined／null／空字串／
+    // 其他字串／數字／布林／物件／陣列）都會被當成測試信處理，而 sendTest
+    // 在自訂權限覆寫下可能比 sendReal 寬鬆，等於讓資料損毀的 campaign
+    // 意外通過較弱的權限檢查。改用 resolveCampaignSendKind()——重用
+    // shared/campaignSend.ts 既有的同一套 mode／isTest 一致性判斷（見該處
+    // 說明：repairCampaignPressReleaseSyncTx 判斷「這是不是正式發送」用的
+    // 就是同一個函式），不新增第二套語意：mode 必須是 'real'／'self'／
+    // 'testList' 三者之一、isTest 必須是合法布林值、且兩者必須相符
+    //（isTest === (mode !== 'real')），全部成立才回傳 'real'／'test'；任何
+    // 一項不成立一律 'invalid'，fail closed，不猜測。
+    const sendKind = resolveCampaignSendKind(rawCampaignData)
+    if (sendKind === 'invalid') {
+      // failed-precondition（不是 internal）：這是「這份文件目前的狀態不
+      // 符合這個操作的前提」，不是未預期的程式例外——跟下面
+      // invalid-generation／generation-exhausted 用同一種錯誤分類與同一句
+      // 措辭，保持一致。訊息刻意不重述 campaignId、不透露 mode／isTest
+      // 實際讀到的值，只說明需要人工檢查，不洩漏 campaign 內容。
+      logger.error('retryCampaign：campaign.mode／isTest 無法安全判斷，拒絕繼續', {
+        campaignPath: campaignRef.path,
+      })
+      throw new HttpsError(
+        'failed-precondition',
+        '這筆發送的內部狀態異常，無法安全處理，請聯絡工程人員檢查 Firestore 資料。',
+      )
+    }
+
+    // 與 sendCampaign 相同的權限分野：正式發送要 sendReal，測試類要
+    // sendTest——身分已經在上面驗證過，sendKind 也已經確認合法，這裡只需要
+    // 呼叫 enforcePermission()（不是重新刻一份權限矩陣，也不是重複呼叫
+    // authorize()）。
+    await enforcePermission(user, sendKind === 'real' ? 'sendReal' : 'sendTest')
+
+    // round 28 新增：活動操作維護模式——見 sendCampaignHandler 對應位置的
+    // 說明，必須緊接在權限檢查之後、在任何 campaign resume／收件人租約
+    // 邏輯之前。
+    await requireCampaignOperationsNotPaused()
 
     // 與 sendCampaign 共用同一套決策邏輯：這裡的 pressReleaseId／mode 一定
     // 跟文件本身相符（不是使用者傳入的），所以不會走到 reject／create 分支，
@@ -2238,7 +2442,11 @@ export const retryCampaign = onCall<{ campaignId: string }>(
     }
 
     return { ok: true, status }
-  },
+}
+
+export const retryCampaign = onCall<{ campaignId: string }>(
+  { secrets: [SMTP_PASS], timeoutSeconds: CAMPAIGN_FUNCTION_TIMEOUT_MS / 1000, memory: '512MiB' },
+  retryCampaignHandler,
 )
 
 /**
@@ -2318,14 +2526,22 @@ async function releaseResolutionLeaseBestEffort(
  * coordinateResolveDeliveryUnknown，不再各自維護一份可能漂移的
  * orchestration 複製品。
  */
-export const resolveDeliveryUnknown = onCall<{
-  campaignId: string
-  recipientId: string
-  action: DeliveryUnknownResolutionAction
-  reason: string
-  resolutionId: string
-}>(async (request) => {
+/** round 28 新增：抽成獨立具名、獨立 export 的 handler，理由與
+ *  sendCampaignHandler 相同——見該處的說明。 */
+export async function resolveDeliveryUnknownHandler(
+  request: CallableRequest<{
+    campaignId: string
+    recipientId: string
+    action: DeliveryUnknownResolutionAction
+    reason: string
+    resolutionId: string
+  }>,
+) {
   const user = await requireAdmin(request.auth)
+
+  // round 28 新增：活動操作維護模式——見 sendCampaignHandler 對應位置的
+  // 說明，緊接在 requireAdmin 之後，是這個 callable 的第一個檢查。
+  await requireCampaignOperationsNotPaused()
 
   const { campaignId, recipientId, action, reason, resolutionId } = request.data ?? {}
   if (!campaignId || typeof campaignId !== 'string' || campaignId.includes('/')) {
@@ -2561,7 +2777,9 @@ export const resolveDeliveryUnknown = onCall<{
     await releaseResolutionLeaseBestEffort(campaignRef, leaseAttemptId)
     throw new HttpsError('internal', `處理失敗：${(err as Error)?.message ?? '未知錯誤'}`)
   }
-})
+}
+
+export const resolveDeliveryUnknown = onCall(resolveDeliveryUnknownHandler)
 
 /**
  * round 14 新增（Finding 2）：只校正狀態、絕對不寄信的維運工具——把部署
@@ -2639,8 +2857,17 @@ async function classifyCampaignForReconciliationGate(campaignRef: FirebaseFirest
   )
 }
 
-export const reconcileCampaignDeliveryStatus = onCall<{ campaignId: string }>(async (request) => {
+/** round 28 新增：抽成獨立具名、獨立 export 的 handler，理由與
+ *  sendCampaignHandler 相同——見該處的說明。 */
+export async function reconcileCampaignDeliveryStatusHandler(
+  request: CallableRequest<{ campaignId: string }>,
+) {
   await requireAdmin(request.auth)
+
+  // round 28 新增：活動操作維護模式——見 sendCampaignHandler 對應位置的
+  // 說明，緊接在 requireAdmin 之後，在下面的 classifyCampaignForReconciliationGate
+  // 唯讀分類檢查（更不用說任何真正取得租約／寫入）之前。
+  await requireCampaignOperationsNotPaused()
 
   const { campaignId } = request.data ?? {}
   if (!campaignId || typeof campaignId !== 'string' || campaignId.includes('/')) {
@@ -2895,7 +3122,9 @@ export const reconcileCampaignDeliveryStatus = onCall<{ campaignId: string }>(as
     })
     throw new HttpsError('internal', `校正失敗：${(err as Error)?.message ?? '未知錯誤'}`)
   }
-})
+}
+
+export const reconcileCampaignDeliveryStatus = onCall(reconcileCampaignDeliveryStatusHandler)
 
 /**
  * round 16 新增（Finding 4）：修復「campaign 已經是終止狀態，但對應的
@@ -2915,6 +3144,18 @@ export const reconcileCampaignDeliveryStatus = onCall<{ campaignId: string }>(as
  *
  * 冪等：新聞稿已經是 status:'sent' 時回傳 'already-synced'，不重複寫入，
  * 可以安全地對同一個 campaignId 重複呼叫。
+ *
+ * round 28 新增：提交前審查明確評估過是否要納入活動操作維護模式
+ * （requireCampaignOperationsNotPaused()），結論是刻意排除，理由：
+ * 1. 只在確認 campaign 已經是 terminal（completed／failed／needs_review）
+ *    時才會考慮寫入——不可能作用在任何進行中的寄送。
+ * 2. 只寫 pressReleases 文件的 status／sentAt 兩個欄位，完全不寫
+ *    campaigns 或其 recipients 子集合，不改變任何 campaign 的寄送狀態。
+ * 3. 結構上不存在任何寄信能力（見上方說明），不會、也不能重新開啟寄送。
+ * 4. 不影響 drain audit（classifyCampaignForDrainAudit）讀取的任何欄位
+ *    ——audit 只讀 campaigns／recipients，完全不讀 pressReleases。
+ * 因此這支工具在維護窗口期間執行，不會產生維護模式原本要防的那一類
+ * 部署期競態，納入反而只是徒增操作摩擦，沒有對應的風險要防。
  */
 export const repairCampaignPressReleaseSync = onCall<{ campaignId: string }>(async (request) => {
   await requireAdmin(request.auth)
@@ -3107,10 +3348,16 @@ export const updateSmtpSettings = onCall<SmtpSettingsRequest>(
 )
 
 /** 測試 SMTP 連線與帳密，成功時可順便寄一封信給操作者。 */
-export const testSmtpConnection = onCall<{ sendTestEmail?: boolean }>(
-  { secrets: [SMTP_PASS], timeoutSeconds: 120 },
-  async (request) => {
+/** round 28 新增：抽成獨立具名、獨立 export 的 handler，理由與
+ *  sendCampaignHandler 相同——見該處的說明。 */
+export async function testSmtpConnectionHandler(request: CallableRequest<{ sendTestEmail?: boolean }>) {
     const admin = await requireAdmin(request.auth)
+
+    // round 28 新增：活動操作維護模式——見 sendCampaignHandler 對應位置的
+    // 說明，緊接在 requireAdmin 之後，在 readSmtpSettings()／建立 SMTP
+    // 連線之前。
+    await requireCampaignOperationsNotPaused()
+
     const settings = await readSmtpSettings()
     const transporter = await createTransport(settings, await readSmtpPassword())
 
@@ -3157,7 +3404,11 @@ export const testSmtpConnection = onCall<{ sendTestEmail?: boolean }>(
 
     transporter.close()
     return { ok: true, message: '連線與帳密驗證成功。' }
-  },
+}
+
+export const testSmtpConnection = onCall<{ sendTestEmail?: boolean }>(
+  { secrets: [SMTP_PASS], timeoutSeconds: 120 },
+  testSmtpConnectionHandler,
 )
 
 /** 把 SMTP 的錯誤訊息翻成看得懂的說明。 */
@@ -3297,10 +3548,23 @@ export const deleteMediaEvent = onCall<{ eventId: string }>(
  * 顛倒過來後，最壞情況只是留下孤兒檔案（不影響任何功能），而且清理失敗的
  * 檔案會記進 storageCleanupQueue，之後可以查詢、重試，不會無聲消失。
  */
-export const deletePressRelease = onCall<{ pressReleaseId: string }>(
-  { timeoutSeconds: 120 },
-  async (request) => {
+/**
+ * round 28 新增（提交前審查發現）：抽成獨立具名、獨立 export 的 handler，
+ * 理由與 sendCampaignHandler 相同——見該處的說明。這支 callable 原本不在
+ * 「六個受管制 callable」名單內，補上的原因：sendCampaignHandler 會讀取
+ * 同一份 pressReleases 文件（見該處 1826 行附近），這支工具若在維護窗口
+ * 期間仍可任意執行，可能刪掉一份正在被新送出請求讀取的新聞稿或附件，
+ * 產生跟「六個受管制 callable」原本要防的同一類部署期競態——維護模式
+ * 存在的目的是建立可靠的部署邊界，不是機械式地只擋最初列出的那六支。
+ */
+export async function deletePressReleaseHandler(request: CallableRequest<{ pressReleaseId: string }>) {
     const user = await requirePermission(request.auth, 'editPress')
+
+    // round 28 新增：活動操作維護模式——見 sendCampaignHandler 對應位置的
+    // 說明，緊接在權限檢查之後，在讀新聞稿文件、刪除文件、初始化 Storage
+    // bucket、刪除任何檔案、或寫入 storageCleanupQueue 之前。
+    await requireCampaignOperationsNotPaused()
+
     const pressReleaseId = request.data?.pressReleaseId
     if (
       !pressReleaseId ||
@@ -3398,7 +3662,11 @@ export const deletePressRelease = onCall<{ pressReleaseId: string }>(
         `刪除新聞稿失敗：${(err as Error).message}`,
       )
     }
-  },
+}
+
+export const deletePressRelease = onCall<{ pressReleaseId: string }>(
+  { timeoutSeconds: 120 },
+  deletePressReleaseHandler,
 )
 
 /**
@@ -3415,10 +3683,16 @@ export const deletePressRelease = onCall<{ pressReleaseId: string }>(
  * sendPendingRecipients 的收件人認領完全同一套邏輯），避免兩個管理員或
  * 兩次呼叫同時處理同一個項目。
  */
-export const processStorageCleanupQueue = onCall<{ limit?: number }>(
-  { timeoutSeconds: 120 },
-  async (request) => {
+/** round 28 新增：抽成獨立具名、獨立 export 的 handler，理由與
+ *  sendCampaignHandler 相同——見該處的說明。 */
+export async function processStorageCleanupQueueHandler(request: CallableRequest<{ limit?: number }>) {
     await requireAdmin(request.auth)
+
+    // round 28 新增：活動操作維護模式——見 sendCampaignHandler 對應位置的
+    // 說明，緊接在 requireAdmin 之後，在 limit 計算／候選查詢（更不用說
+    // 任何租約認領或 Storage 刪除）之前。
+    await requireCampaignOperationsNotPaused()
+
     const limit = Math.min(Math.max(Number(request.data?.limit) || 50, 1), 200)
     const attemptId = randomUUID()
     const bucket = getStorage().bucket()
@@ -3511,7 +3785,11 @@ export const processStorageCleanupQueue = onCall<{ limit?: number }>(
       exhausted,
       remainingCandidates: candidateSnap.size - processed,
     }
-  },
+}
+
+export const processStorageCleanupQueue = onCall<{ limit?: number }>(
+  { timeoutSeconds: 120 },
+  processStorageCleanupQueueHandler,
 )
 
 /**

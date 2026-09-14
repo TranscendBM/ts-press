@@ -19,6 +19,12 @@ export default defineConfig({
       'tests/campaignFieldMaskEmulator.test.ts',
       // round 26 新增：同上，--action repair-status 的 emulator 整合測試。
       'tests/campaignStatusRepairEmulator.test.ts',
+      // round 28 新增：system/runtime 維護旗標的 emulator 整合測試——
+      // Admin SDK 讀寫本身、ops-maintenance.mjs 的 transaction、以及六個
+      // 受管制 callable 的維護模式攔截，皆需要真正的 Firestore emulator。
+      'tests/systemRuntimeAdminEmulator.test.ts',
+      'tests/opsMaintenanceEmulator.test.ts',
+      'tests/maintenanceCallableGate.test.ts',
     ],
     server: {
       deps: {

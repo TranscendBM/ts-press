@@ -25,6 +25,19 @@
 import { deleteApp, initializeApp } from 'firebase-admin/app'
 import { getFirestore } from 'firebase-admin/firestore'
 
+// round 28 新增：tests/maintenanceCallableGate.test.ts 需要跟
+// functions/src/index.ts 內部完全同一個（預設）Admin App 的 Firestore
+// 實例，才能把測試資料種進 index.ts 六個 handler 實際會讀到的同一份
+// emulator 狀態——而不是（像 createEmulatorFirestoreApp 那樣）另外建立一個
+// 具名的 App 實例。這裡直接 re-export getFirestore，同一個理由（bare
+// specifier 解析要落在 functions/node_modules，見檔案開頭說明），不是
+// 重新自己刻一份。呼叫端必須自己確保：(1) 先設定好
+// FIRESTORE_EMULATOR_HOST／GCLOUD_PROJECT，(2) 先 `await import()`
+// functions/src/index.ts（讓它自己的頂層 initializeApp() 先建立預設
+// App），再呼叫這裡的 getFirestore()（不帶參數）取得同一個預設 App 的
+// Firestore 實例——這支檔案本身不負責、也不能保證呼叫順序。
+export { getFirestore } from 'firebase-admin/firestore'
+
 // round 26 新增：FieldValue／Timestamp 跟 FieldPath 一樣，都是測試需要組出
 // 跟 production 相同的寫入內容（serverTimestamp()／delete()／
 // Timestamp.fromMillis()）時才需要的 Admin SDK 匯出——原因跟上面說明
@@ -32,6 +45,23 @@ import { getFirestore } from 'firebase-admin/firestore'
 // re-export，root 的 tests/*.test.ts 才能正確解析到
 // functions/node_modules/firebase-admin，不必另外裝一份可能版本不同的複本。
 export { FieldPath, FieldValue, Timestamp } from 'firebase-admin/firestore'
+
+// round 28 新增（提交前審查發現）：tests/maintenanceCallableGate.test.ts
+// 需要證明「未登入的呼叫在讀取任何 campaign 文件之前就被拒絕」，最直接
+// 的作法是對 DocumentReference.prototype.get 設一個 passthrough spy，
+// 呼叫結束後斷言完全沒有被呼叫過——同一個理由（bare specifier 解析要落在
+// functions/node_modules），只從這裡 re-export，不在測試檔案裡另外想辦法
+// 匯入。
+export { DocumentReference } from 'firebase-admin/firestore'
+
+// round 28 新增（提交前審查新增）：tests/maintenanceCallableGate.test.ts
+// 需要驗證 deletePressReleaseHandler 真正成功刪除 Storage 檔案的路徑——
+// 跟上面 getFirestore() 同一個理由與同一個呼叫順序限制：呼叫端必須先
+// `await import()` functions/src/index.ts（讓它的頂層 initializeApp() 先
+// 建立預設 App），再呼叫這裡的 getStorage()（不帶參數）取得同一個預設 App
+// 的 Storage 實例，這樣測試種進去、驗證的檔案，才跟 handler 內部
+// `getStorage().bucket()` 操作的是同一個 emulator bucket。
+export { getStorage } from 'firebase-admin/storage'
 
 let appCounter = 0
 

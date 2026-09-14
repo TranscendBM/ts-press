@@ -50,6 +50,22 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // round 28 新增：活動操作維護模式旗標（campaignOperationsPaused，見
+    // shared/maintenance.ts 的完整說明）。刻意對「任何」client 端一律
+    // 拒絕讀寫，即使是 admin 角色也不例外——跟上面 settings/smtp（admin
+    // 可讀）不同：這份文件唯一的讀者／寫入者是 Cloud Functions 本身
+    // （sendCampaign 等六個 callable 讀取；ops-maintenance.mjs CLI 透過
+    // Admin SDK 寫入），不需要、也不應該讓任何前端介面直接讀寫它——維護
+    // 狀態本身不是需要在後台顯示的資訊，而且開放 client 讀寫只會增加
+    // 「這個安全機制被繞過或被誤用」的攻擊面。Admin SDK 本來就完全略過
+    // Firestore 安全規則（Firestore 本身的設計如此），這裡的 `if false`
+    // 不影響 Cloud Functions 端的讀寫，只是確保沒有任何 client 路徑能碰到
+    // 這份文件。
+    match /system/runtime {
+      allow read: if false;
+      allow write: if false;
+    }
+
     // 信件頁首與新聞聯絡人：編輯稿件時要預覽，所以全員可讀；只有 admin 能改。
     match /settings/email {
       allow read: if isWhitelisted();

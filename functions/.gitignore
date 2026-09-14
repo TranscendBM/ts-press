@@ -7,3 +7,4 @@ src/policy.generated.ts
 src/permissions.generated.ts
 src/pressCleanup.generated.ts
 src/campaignSend.generated.ts
+src/maintenance.generated.ts

@@ -10,7 +10,8 @@
     "logs": "firebase functions:log",
     "prebuild": "node scripts/sync-shared.mjs",
     "audit:drain": "npm run build && node scripts/audit-campaign-drain.mjs",
-    "ops:campaign-repair": "npm run build && node scripts/ops-campaign-repair.mjs"
+    "ops:campaign-repair": "npm run build && node scripts/ops-campaign-repair.mjs",
+    "ops:maintenance": "npm run build && node scripts/ops-maintenance.mjs"
   },
   "engines": {
     "node": "22"
