@@ -25,6 +25,10 @@ export default defineConfig({
       'tests/systemRuntimeAdminEmulator.test.ts',
       'tests/opsMaintenanceEmulator.test.ts',
       'tests/maintenanceCallableGate.test.ts',
+      // round 29 新增：sendSelfTestEmail callable 的 emulator 整合測試——
+      // 需要真正的 Firestore emulator（冷卻 transaction），見
+      // vitest.rules.config.ts。
+      'tests/sendSelfTestEmailCallable.test.ts',
     ],
     server: {
       deps: {

@@ -34,6 +34,11 @@ export default defineConfig({
       'tests/systemRuntimeAdminEmulator.test.ts',
       'tests/opsMaintenanceEmulator.test.ts',
       'tests/maintenanceCallableGate.test.ts',
+      // round 29 新增：sendSelfTestEmail callable——冷卻 transaction 需要
+      // 真正的 Firestore emulator，同樣的理由必須透過 `npm run test:rules` 執行
+      // （SMTP／Secret Manager 全程 mock，見該檔案開頭的說明，不會有任何
+      // 真正的網路呼叫）。
+      'tests/sendSelfTestEmailCallable.test.ts',
     ],
     // 這幾個檔案各自對本機模擬器呼叫 initializeTestEnvironment() 部署自己
     // 的一套 Storage 規則。Storage 模擬器（不像 Firestore）在多個測試檔
