@@ -111,6 +111,14 @@ export interface PressRelease {
   ownerEmail?: string
   ownerName?: string
   versions: Record<Language, PressVersion>
+  /**
+   * round 30 新增：US 版本是否與 WWW 版本保持相同——true 時
+   * versions.us.subject／versions.us.bodyText 必須（由
+   * src/lib/pressContentSync.ts 的 canonicalizePressForSync() 強制）等於
+   * versions.www 的對應欄位，US 版本這兩個欄位在編輯畫面唯讀。
+   * 舊新聞稿缺少這個欄位時視為 false，維持既有的獨立編輯行為。
+   */
+  usSyncedWithWww?: boolean
   /** 附件為三個版本共用。 */
   attachments: StoredFile[]
   status: 'draft' | 'sent'

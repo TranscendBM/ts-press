@@ -37,6 +37,7 @@ import {
 } from '../constants'
 import type { AppUser, EmailSettings, PressRelease, StoredFile } from '../types'
 import { blankVersions, formatBytes } from '../lib/helpers'
+import { canonicalizePressForSync, createPressPatcher, type PressPatcher } from '../lib/pressContentSync'
 import {
   deletePressFile,
   describeStorageError,
@@ -60,6 +61,12 @@ export default function PressEditPage() {
   // 編輯就自動追加送出，避免「較新的內容還沒寫入卻被標成已儲存」。
   // 詳見 src/lib/autosave.ts 的說明。
   const controllerRef = useRef<AutosaveController<PressRelease> | null>(null)
+  // round 30 提交前審查追加：patch() 的 stale-closure 修正——見
+  // src/lib/pressContentSync.ts 的 createPressPatcher() 說明。用這個 ref
+  // 取代直接讀取 `press` state，確保同一個 tick 內連續呼叫 patch() 時，
+  // 第二次一定是基於第一次呼叫「最新的結果」，不會讀到尚未 re-render 的
+  // 舊值而遺失第一次的修改。
+  const patcherRef = useRef<PressPatcher | null>(null)
   // 存最新的 save，讓自動儲存的計時器永遠呼叫到當前 render 的版本
   const saveRef = useRef<() => Promise<boolean>>(() => Promise.resolve(false))
   const [previewOpen, setPreviewOpen] = useState(false)
@@ -94,13 +101,25 @@ export default function PressEditPage() {
     getDoc(doc(db, 'pressReleases', id)).then((snap) => {
       if (snap.exists()) {
         const data = snap.data() as PressRelease
-        const initial: PressRelease = {
+        // canonicalizePressForSync()：防禦性地在載入當下就確保一致性
+        // （見該函式說明）——正常情況下 Firestore 裡的資料本來就該是一致
+        // 的（寫入路徑與 Rules 都會保證），這裡只是多一層保險，不假設
+        // 資料庫內容一定正確。
+        const initial: PressRelease = canonicalizePressForSync({
           ...data,
           id: snap.id,
           versions: { ...blankVersions(), ...data.versions },
           attachments: data.attachments ?? [],
-        }
+        })
         setPress(initial)
+        // patcherRef 是 patch() 真正讀寫「最新內容」的地方（見上方欄位
+        // 宣告的說明）——onChange 在這裡才呼叫 setPress／markEdited，
+        // 兩者都是一般同步函式呼叫，沒有包在任何 React setState 的
+        // updater function 裡，不會被 Strict Mode 的雙重呼叫影響到副作用。
+        patcherRef.current = createPressPatcher(initial, (next) => {
+          setPress(next)
+          controllerRef.current?.markEdited(next)
+        })
         controllerRef.current = createAutosaveController(initial, {
           write: async (snapshot) => {
             const { id: _id, createdAt: _c, ...rest } = snapshot
@@ -141,11 +160,24 @@ export default function PressEditPage() {
     return () => window.removeEventListener('beforeunload', onBeforeUnload)
   }, [dirty])
 
+  // round 30 新增：patch() 是這個頁面唯一的狀態變更入口（不管是編輯欄位、
+  // 上傳圖片、勾選同步 checkbox，還是任何未來新增的欄位），所以「US 版本
+  // 是否要跟 WWW 保持一致」這條規則只需要在這裡強制一次——見
+  // canonicalizePressForSync() 的說明，這樣不管哪個 onChange handler
+  // 觸發了 patch()，結果一定符合同步規則，不會有任何修改路徑漏接。
+  //
+  // 提交前審查追加：實際的讀寫改成透過 patcherRef（見上方欄位宣告與
+  // src/lib/pressContentSync.ts 的 createPressPatcher() 說明），不再直接
+  // 讀取 `press` state——`press` 只在 render 完成後才會更新，若同一個
+  // tick 內連續呼叫兩次 patch()，直接讀 `press` 會讓第二次呼叫看到第一次
+  // 呼叫之前的舊值，蓋掉第一次剛做的修改。patcherRef 內部用同步更新的
+  // 閉包變數取代，保證第二次呼叫一定是基於第一次的最新結果。
+  // canonicalize 過的結果同時用於 setPress（畫面顯示）與
+  // controllerRef.markEdited（autosave／手動儲存都走同一個 controller），
+  // 兩者保證看到完全一致的內容，不會有「畫面看起來同步了，但存進資料庫
+  // 的還是舊內容」這種分歧。
   function patch(updater: (p: PressRelease) => PressRelease) {
-    if (!press) return
-    const next = updater(press)
-    setPress(next)
-    controllerRef.current?.markEdited(next)
+    patcherRef.current?.patch(updater)
   }
 
   function patchVersion(field: 'subject' | 'bodyText', value: string) {
@@ -323,6 +355,11 @@ export default function PressEditPage() {
 
   const version = press.versions[lang]
   const attachTotal = press.attachments.reduce((s, a) => s + a.size, 0)
+  // round 30 新增：US 頁籤在同步中時，主旨／內文唯讀，避免使用者在畫面上
+  // 打字卻馬上被下一次 canonicalize 蓋掉，造成「打了字又消失」的錯覺——
+  // 這只是 UI 層的防呆，真正保證一致性的是 patch() 裡的
+  // canonicalizePressForSync()。
+  const usReadOnly = lang === 'us' && press.usSyncedWithWww === true
 
   // 下載與預覽共用同一份資料，確保看到的跟寄出的一致
   const templateInput = {
@@ -527,14 +564,39 @@ export default function PressEditPage() {
           </div>
 
           <div className="space-y-5 p-5">
+            {lang === 'us' && (
+              <label className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={press.usSyncedWithWww === true}
+                  onChange={(e) => {
+                    const checked = e.target.checked
+                    // patch() 內部的 canonicalizePressForSync() 會在同一次
+                    // 呼叫裡立刻把目前的 WWW 內容複製到 US（勾選時）；取消
+                    // 勾選時純粹只改這個 boolean，US 目前的內容原封不動保留
+                    // 下來，之後可以獨立編輯——見 canonicalizePressForSync()
+                    // 與 patch() 的說明。
+                    patch((p) => ({ ...p, usSyncedWithWww: checked }))
+                  }}
+                />
+                US 版本與 WWW 版本保持相同
+              </label>
+            )}
+
             <Field
               label="信件主旨"
-              hint="按 Enter 可手動斷行；斷行只顯示在信件內文、Word、PDF 的大標題，收件匣看到的主旨仍是一行。"
+              hint={
+                usReadOnly
+                  ? '此欄位與 WWW 版本同步中，如需個別編輯請先取消上方勾選。'
+                  : '按 Enter 可手動斷行；斷行只顯示在信件內文、Word、PDF 的大標題，收件匣看到的主旨仍是一行。'
+              }
             >
               <TextArea
                 rows={2}
                 value={version.subject}
                 onChange={(e) => patchVersion('subject', e.target.value)}
+                readOnly={usReadOnly}
+                className={usReadOnly ? 'bg-slate-50 text-slate-500' : ''}
                 placeholder={
                   lang === 'tw' ? '創見資訊發表…' : 'Transcend Announces…'
                 }
@@ -543,13 +605,18 @@ export default function PressEditPage() {
 
             <Field
               label="內文"
-              hint="空一行代表分段。開頭加「## 」的行會變成小標題。網址會自動變成連結。"
+              hint={
+                usReadOnly
+                  ? '此欄位與 WWW 版本同步中，如需個別編輯請先取消上方勾選。'
+                  : '空一行代表分段。開頭加「## 」的行會變成小標題。網址會自動變成連結。'
+              }
             >
               <TextArea
                 rows={16}
                 value={version.bodyText}
                 onChange={(e) => patchVersion('bodyText', e.target.value)}
-                className="leading-relaxed"
+                readOnly={usReadOnly}
+                className={usReadOnly ? 'bg-slate-50 text-slate-500 leading-relaxed' : 'leading-relaxed'}
               />
             </Field>
 
