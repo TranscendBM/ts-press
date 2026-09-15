@@ -905,3 +905,67 @@ describe('firestore.rules — system/runtime（活動操作維護模式旗標，
     await assertFails(getDoc(ref(as('admin@x.com'))))
   })
 })
+
+/**
+ * round 29 新增：selfTestEmailCooldowns/{uid}（sendSelfTestEmail 的節流冷卻
+ * 紀錄，見 shared/selfTestEmail.ts 與 firestore.rules 對應 match 區塊的
+ * 說明）。跟上面的 system/runtime 同一種風格——這份文件唯一的讀者／寫入者
+ * 是 sendSelfTestEmail 這個 callable 自己的 Firestore transaction，刻意
+ * 對「任何」client 角色一律拒絕讀寫，admin 角色也不例外。
+ */
+describe('firestore.rules — selfTestEmailCooldowns/{uid}（寄測試信給自己的節流冷卻紀錄，只有 Cloud Functions Admin SDK 能讀寫）', () => {
+  let env: RulesTestEnvironment
+
+  beforeAll(async () => {
+    env = await initializeTestEnvironment({
+      projectId: 'ts-press-fs-rules-self-test-email-cooldowns',
+      firestore: {
+        rules: readFileSync('firestore.rules', 'utf8'),
+        host: HOST,
+        port: PORT,
+      },
+    })
+  })
+
+  afterAll(async () => env?.cleanup())
+
+  beforeEach(async () => {
+    await env.clearFirestore()
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore()
+      await setDoc(doc(db, 'users', 'admin@x.com'), {
+        email: 'admin@x.com',
+        role: 'admin',
+        active: true,
+      })
+      await setDoc(doc(db, 'users', 'spec@x.com'), {
+        email: 'spec@x.com',
+        role: 'specialist',
+        active: true,
+      })
+    })
+  })
+
+  function as(email: string): Firestore {
+    return env
+      .authenticatedContext(email, { email, email_verified: true })
+      .firestore()
+  }
+  const anon = () => env.unauthenticatedContext().firestore()
+  const ref = (db: Firestore) => doc(db, 'selfTestEmailCooldowns', 'some-uid')
+
+  it('未登入：讀取與寫入都被拒絕', async () => {
+    await assertFails(getDoc(ref(anon())))
+    await assertFails(setDoc(ref(anon()), { lastSentAtMs: Date.now() }))
+  })
+
+  it('一般白名單使用者（非 admin）：讀取與寫入都被拒絕', async () => {
+    await assertFails(getDoc(ref(as('spec@x.com'))))
+    await assertFails(setDoc(ref(as('spec@x.com')), { lastSentAtMs: Date.now() }))
+  })
+
+  it('admin 角色：讀取與寫入同樣都被拒絕——這份文件對任何 client 角色一律不開放，只有 Cloud Functions 的 Admin SDK（sendSelfTestEmailHandler 自己的 transaction）能碰它', async () => {
+    await assertFails(getDoc(ref(as('admin@x.com'))))
+    await assertFails(setDoc(ref(as('admin@x.com')), { lastSentAtMs: Date.now() }))
+  })
+})

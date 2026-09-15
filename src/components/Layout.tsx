@@ -13,6 +13,7 @@ import { useAuth } from '../lib/AuthContext'
 import { useBranding } from '../lib/useBranding'
 import { ROLE_LABELS, normalizeRole } from '../constants'
 import { ROUTE_PERMISSIONS } from '../lib/routePermissions'
+import SelfTestEmailButton from './SelfTestEmailButton'
 
 // 顯示用的標籤與圖示，權限與路徑則統一來自 ROUTE_PERMISSIONS ——
 // 與路由守門共用同一份權限對照，避免「選單藏起來、網址卻進得去」的落差。
@@ -102,6 +103,13 @@ export default function Layout() {
             <LogOut className="size-3.5" />
             登出
           </button>
+
+          {/* 任何 active 使用者都能看到、不受 RequirePermission 限制——刻意
+              放在 Layout 這裡（每個已登入路由都會經過），不是某個特定頁面
+              底下，理由見 functions/src/index.ts sendSelfTestEmailHandler
+              上方的說明：這個功能本來就設計成給「任何」帳號使用，不能因為
+              權限矩陣改動而讓某些角色找不到入口。 */}
+          <SelfTestEmailButton />
         </div>
       </aside>
 

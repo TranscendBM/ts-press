@@ -101,6 +101,12 @@ import {
   MAINTENANCE_PAUSED_MESSAGE,
   type MaintenanceFlagReadOutcome,
 } from './maintenance.generated'
+import {
+  decideSelfTestEmailCooldown,
+  describeSelfTestEmailSendError,
+  SELF_TEST_EMAIL_COOLDOWN_MS,
+  validateSelfTestEmailRecipient,
+} from './selfTestEmail.generated'
 
 interface AuthorizedUser {
   email: string
@@ -3409,6 +3415,167 @@ export async function testSmtpConnectionHandler(request: CallableRequest<{ sendT
 export const testSmtpConnection = onCall<{ sendTestEmail?: boolean }>(
   { secrets: [SMTP_PASS], timeoutSeconds: 120 },
   testSmtpConnectionHandler,
+)
+
+/**
+ * 固定、伺服器端控制的測試信內容——純文字，不是 HTML，刻意跟
+ * testSmtpConnectionHandler 內聯寫的測試信同一種風格（見上方 sendMail 呼叫）。
+ * 沒有任何需要 HTML escape 的插值：收件信箱與時間都是伺服器自己決定的值
+ * （分別來自 authorize() 解出的 request.auth.token.email、以及呼叫當下的
+ * `new Date()`），不是使用者可以自由輸入的文字欄位。
+ */
+function buildSelfTestEmailText(email: string, sentAt: Date): string {
+  return [
+    '這是一封由新聞稿發送系統自動寄出的測試信。',
+    '',
+    `收件信箱：${email}`,
+    `寄出時間：${sentAt.toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })}`,
+    '',
+    '如果你收到這封信，代表這個信箱可以正常收到本系統寄出的郵件。',
+    '這封信只寄給你自己，不會被記錄在任何發送名單或發送紀錄裡。',
+  ].join('\n')
+}
+
+const SELF_TEST_EMAIL_SUBJECT = '[測試信] 新聞稿發送系統帳號驗證'
+
+/**
+ * 讓任何一個已登入、帳號啟用中的團隊成員（不限 admin）寄一封測試信到自己
+ * 的信箱，確認這個帳號能收到本系統寄出的郵件。
+ *
+ * 跟上面的 testSmtpConnectionHandler 刻意是兩個完全獨立的 callable、兩套
+ * 判斷邏輯：
+ * - testSmtpConnection 驗證的是「系統本身的 SMTP 設定是否正確」，只有
+ *   admin 能呼叫（requireAdmin()）。
+ * - sendSelfTestEmailHandler 驗證的是「這個使用者自己的信箱能不能收到
+ *   信」，任何 authorize() 判定為 active 的使用者都能呼叫——不需要、也不
+ *   應該要求對方是 admin。
+ * 兩者不共用同一個權限層：不會放寬 testSmtpConnection 的 requireAdmin()
+ * 檢查，也不會在它裡面加一個「寄給自己」的分支——這兩件事故意保持獨立，
+ * 之後任何一邊的權限規則異動都不會意外影響到另一邊。
+ *
+ * 呼叫順序（刻意固定，任何修改都不該打亂）：
+ * 1. authorize(request.auth, false)——任何 active、已驗證信箱的使用者，
+ *    不要求任何特定權限（needsSendRole:false，跟 requireAdmin() 賴以
+ *    建構的同一個原語，只是不疊加 admin 限制）。
+ * 2. requireCampaignOperationsNotPaused()——round 28 維護旗標，必須排在
+ *    任何 Firestore 冷卻讀寫、任何 SMTP 讀取／連線之前。
+ * 3. validateSelfTestEmailRecipient()——提交前審查新增的最後一道收件人
+ *    確認，獨立於 authorize()（不修改、不重複 authorize() 已經做過的
+ *    active／emailVerified 判斷）。任何一項不通過都在這裡直接 fail
+ *    closed，連冷卻額度都不會佔用，見 shared/selfTestEmail.ts 的完整說明。
+ * 4. 冷卻檢查（Firestore transaction）——在真正寄信之前就先佔用這次額度。
+ * 5. 讀 SMTP 設定、建立連線、寄信。
+ *
+ * ⚠️ 冷卻的 crash／exactly-once 但書：冷卻額度是在 SMTP 真正寄信「之前」
+ * 用 Firestore transaction 佔用的，且寄信失敗或函式中途崩潰都不會退還這
+ * 次額度。取捨如下：
+ * (a) 主要目的——同一位使用者連續點兩次，只有一次能真正走到寄信，另一次
+ *     會在 transaction 裡輸掉、直接看到「還在冷卻中」，不會兩封都寄出去。
+ * (b) 代價——如果 Function process 在 SMTP 伺服器已經接受這封信（甚至只是
+ *     寄送過程進行到一半）之後、但在這次呼叫真正回傳結果之前當掉或逾時，
+ *     呼叫端沒有辦法知道信到底有沒有真的寄出去；在冷卻視窗內重試只會看到
+ *     「請稍候再試」，不會看到「確定寄出／確定沒寄出」。這裡刻意誠實記錄
+ *     這個限制——**這不是 exactly-once 的寄信保證**，只是一個儘量避免
+ *     「使用者手指按太快，同時兩封都寄出去」的節流機制，不是能保證每次
+ *     呼叫最多寄一封信、也不是能保證每次呼叫至少寄一封信。
+ */
+export async function sendSelfTestEmailHandler(request: CallableRequest<unknown>) {
+  const user = await authorize(request.auth, false)
+
+  // round 29 新增：跟六個受管制 callable 同一個維護旗標與同一個檢查順序
+  // ——緊接在授權之後、任何冷卻讀寫或 SMTP 相關動作之前。
+  await requireCampaignOperationsNotPaused()
+
+  const uid = request.auth?.uid
+  if (!uid) {
+    // authorize() 成功已經隱含 request.auth?.token?.email 存在、且對應的
+    // users/{email} 文件 active===true——理論上不可能在這種情況下拿不到
+    // uid（onCall 的 auth 物件本來就是同一次驗證結果的一部分）。這裡只是
+    // 防禦性的 fail-closed 保護，不是真的預期會走到的分支。
+    throw new HttpsError('internal', '無法識別使用者身分，請重新登入後再試一次。')
+  }
+
+  // round 29 提交前審查新增：寄信前最後一道收件人驗證——不修改
+  // authorize()，而是獨立重新從 request.auth.token.email 取出一次候選值
+  // （用跟 authorize() 內部完全一樣的正規化方式：小寫化），驗證它本身格式
+  // 合法、沒有前後空白／CR-LF，且跟 authorize() 已經驗證過的
+  // canonical email（user.email）完全一致。任何一項不通過都在這裡直接
+  // fail closed——不會佔用冷卻額度、不會呼叫 Secret Manager、不會建立
+  // SMTP 連線、不會寄信。見 shared/selfTestEmail.ts 的
+  // validateSelfTestEmailRecipient() 說明。
+  const candidateEmail = request.auth?.token?.email?.toLowerCase() ?? ''
+  const recipientCheck = validateSelfTestEmailRecipient(candidateEmail, user.email)
+  if (!recipientCheck.ok) {
+    throw new HttpsError('internal', '無法確認收件信箱，請重新登入後再試一次。')
+  }
+
+  const nowMs = Date.now()
+  const cooldownRef = db.collection('selfTestEmailCooldowns').doc(uid)
+  const decision = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(cooldownRef)
+    const result = decideSelfTestEmailCooldown(
+      snap.exists ? snap.data()?.lastSentAtMs : undefined,
+      nowMs,
+      SELF_TEST_EMAIL_COOLDOWN_MS,
+    )
+    if (result.outcome === 'claim') {
+      tx.set(cooldownRef, { lastSentAtMs: nowMs, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+    }
+    return result
+  })
+  if (decision.outcome === 'cooldown') {
+    const retryAfterSeconds = Math.ceil(decision.retryAfterMs / 1000)
+    // round 29 提交前審查新增：把重試秒數放進 details（結構化資料，不是
+    // message 文字本身）——前端應該用 details.retryAfterSeconds 組出自己
+    // 的固定文案，不是直接顯示這裡的 message，見
+    // src/components/SelfTestEmailButton.tsx 的說明。
+    throw new HttpsError(
+      'resource-exhausted',
+      `請稍候 ${retryAfterSeconds} 秒再試一次，避免重複寄送。`,
+      { retryAfterSeconds },
+    )
+  }
+
+  const settings = await readSmtpSettings()
+  const transporter = await createTransport(settings, await readSmtpPassword())
+  try {
+    // ⚠️ 收件人只可能是這一行的 `user.email`——它來自 authorize() 解析
+    // request.auth.token.email 之後、比對 users/{email} 白名單得到的結果，
+    // 不是 request.data 裡的任何欄位。這個函式從頭到尾沒有讀過
+    // request.data 的任何內容（上面的函式簽名故意寫成
+    // `CallableRequest<unknown>`，不是某種帶 to/recipient/email 欄位的
+    // 型別），所以就算呼叫端在 request.data 塞了
+    // `{ to: 'attacker@evil.com' }`、`{ recipient: ... }`、
+    // `{ email: ... }` 或任何其他欄位，這些值在結構上完全沒有機會流進
+    // sendMail() 的 mail options——不是「檢查過後拒絕」，而是這段程式碼
+    // 從未讀取過那個值。
+    await transporter.sendMail({
+      to: user.email,
+      from: `"創見資訊 新聞中心" <${settings.fromEmail}>`,
+      replyTo: settings.replyTo,
+      subject: SELF_TEST_EMAIL_SUBJECT,
+      text: buildSelfTestEmailText(user.email, new Date(nowMs)),
+    })
+  } catch (err) {
+    // round 29 提交前審查修正：這裡不能再用 describeSmtpError()——那支
+    // 函式的每個分支都會把原始 err.message（可能含真實 host/IP/port/帳號/
+    // SMTP 伺服器回應內容）原封不動嵌進回傳字串，是專門給 admin-only 的
+    // testSmtpConnection 設計的取捨，不適用於任何 active 一般成員都能
+    // 呼叫的這支 callable。改用 describeSelfTestEmailSendError()——只看
+    // err.code／err.responseCode 這類結構化欄位分類，回傳固定、完全不含
+    // 任何動態內容的中文訊息，見 shared/selfTestEmail.ts 的完整說明。
+    logger.error('sendSelfTestEmail 寄信失敗', { code: (err as { code?: string })?.code })
+    throw new HttpsError('failed-precondition', describeSelfTestEmailSendError(err))
+  } finally {
+    transporter.close()
+  }
+
+  return { ok: true }
+}
+
+export const sendSelfTestEmail = onCall<unknown>(
+  { secrets: [SMTP_PASS], timeoutSeconds: 60 },
+  sendSelfTestEmailHandler,
 )
 
 /** 把 SMTP 的錯誤訊息翻成看得懂的說明。 */

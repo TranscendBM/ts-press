@@ -66,6 +66,19 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // round 29 新增：sendSelfTestEmail 的節流冷卻紀錄（見
+    // shared/selfTestEmail.ts 的完整說明）。每份文件只存
+    // `{lastSentAtMs, updatedAt}`，文件 id 是 Firebase Auth 的 uid——刻意
+    // 不存 email 或其他任何個資，跟 system/runtime 同一種「Functions-only，
+    // 沒有任何 client 讀寫路徑」的風格：唯一的讀者／寫入者是
+    // sendSelfTestEmail 這個 callable 自己的 Firestore transaction，沒有
+    // 任何理由讓前端直接讀寫這份文件（就算是本人的冷卻紀錄也不用讀——前端
+    // 的節流只是 UX 層的按鈕 disable，真正的節流在後端）。
+    match /selfTestEmailCooldowns/{uid} {
+      allow read: if false;
+      allow write: if false;
+    }
+
     // 信件頁首與新聞聯絡人：編輯稿件時要預覽，所以全員可讀；只有 admin 能改。
     match /settings/email {
       allow read: if isWhitelisted();
