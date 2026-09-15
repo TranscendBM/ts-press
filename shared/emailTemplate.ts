@@ -181,24 +181,121 @@ export function splitLinks(text: string): { text: string; url?: string }[] {
 }
 
 /**
- * 把純文字切成區塊。空行分段；以 `## ` 開頭的行視為小標題。
+ * round 30 新增：內文的「共用」區塊切分邏輯——標題（`## ` 開頭的行）與
+ * 段落（其餘文字，空行分段）的判斷從這裡開始，是唯一的權威來源。
+ * `renderBlocks()`／`renderBodyHtml()`（本檔案）與
+ * `src/lib/exportDoc.ts` 的 Word／PDF 產生邏輯都改呼叫這裡，不再各自
+ * 重刻一份幾乎一樣、但容易漂移的切分規則。
+ *
+ * ⚠️ 修正的根因（round 30 提交前調查）：舊版邏輯是「先用兩個以上換行
+ * （`\n{2,}`，也就是空行）切成區塊，再判斷『整個區塊』是不是以 `## `
+ * 開頭」——這代表 `## 標題\n下一段內文`（中間只有一個換行、沒有空行）
+ * 會被視為『同一個區塊』，而這整個區塊（含標題與下一段的所有文字）都會
+ * 被當成標題文字的一部分，不會產生獨立的段落。這裡改成逐行掃描：
+ * 只要偵測到一行是 `## ` 開頭（且不在 fenced code block 內），就立刻
+ * 把它切成獨立的標題區塊，不管前後有沒有空行，下一行自動從新的段落
+ * 開始累積——這樣「標題後緊接著一行內文、中間沒有空行」也能正確拆成
+ * 「一個標題 + 一個獨立段落」。
+ *
+ * 逐行掃描規則：
+ * - 空白行（trim 後是空字串）→ 段落之間的分隔，不會產生任何區塊本身，
+ *   只是把目前正在累積的段落區塊收尾（沒有累積中的內容就不做任何事，
+ *   避免連續空行產生空區塊）。
+ * - 開頭是 `## ` 的行（且不在 fenced code block 內）→ 先把目前正在累積
+ *   的段落區塊收尾，再單獨產生一個標題區塊（`## ` 之後、trim 過的文字），
+ *   不會吃掉下一行。「## 」必須出現在整行的最開頭（`startsWith('## ')`，
+ *   跟修正前的判斷條件完全相同），一般句子中間出現的 `##`
+ *  （例如「5 ## 3」）不會被誤判成標題。
+ * - 以三個反引號（` ``` `）開頭的行 → 切換「是否在 fenced code block
+ *   內」的狀態，這一行本身原樣保留在目前段落裡（不特別渲染成程式碼
+ *   區塊——這支解析器本來就沒有這個概念，這裡只確保 fenced code block
+ *   「裡面」的任何一行，即使剛好以 `## ` 開頭，也不會被誤判成標題）。
+ * - 其他任何一行 → 併入目前正在累積的段落（用 `\n` 銜接，讓呼叫端
+ *   可以再轉成 `<br>` 或 Word 的換行符號，保留使用者手動按 Enter 的
+ *   單行斷行）。
+ *
+ * 刻意不修改使用者存在 Firestore 的原始 bodyText——這裡回傳的是解析後的
+ * 結構化區塊陣列，不是就地改寫字串本身，符合「不做非必要 normalization」
+ * 的原則（見 round 30 的完整討論）。
+ *
+ * 提交前審查追加說明——未閉合 fenced code block 的語意（刻意行為，不是
+ * bug）：一行 ``` 開頭的行會切換 inFence 狀態；如果內文到結尾都沒有再出現
+ * 對應的收尾 ``` ，inFence 會一路維持 true 直到掃描結束，中間所有行
+ * （包含看起來像標題的 `## ` 開頭的行）都會被當成程式碼內容的一部分，
+ * 不會被判斷成獨立段落或標題。這是照著 Markdown 慣例走的：未閉合的
+ * fenced code block 視為一路延伸到檔案結尾，不會有「自動補上收尾、後面
+ * 的內容恢復成一般 Markdown」這種行為，也不會嘗試用其他規則猜測使用者
+ * 是不是忘了打收尾 ``` 。之所以在這裡明講，是因為這是加入 fence 感知
+ * 之後才出現的全新邊界情況（round 30 之前的版本完全沒有 fence 概念，
+ * 不存在「fence 沒收尾」這種狀態），必須明確記錄下來、避免日後被誤認為
+ * 需要修的 bug 而改掉。
+ *
+ * 支援範圍的判斷：只認得行首三個反引號（` ``` `，可帶語言標籤，例如
+ * ` ```ts `）；不支援 ` ~~~ ` fence、不支援用縮排 4 個空白代表程式碼
+ * 區塊。這不是遺漏，是刻意維持的範圍——全專案（email／Word／PDF／前端
+ * 預覽）目前沒有任何一個輸出端曾經支援過完整 CommonMark 的 fence 語法
+ * （搜尋整個 repo 找不到任何處理 `~~~` 的程式碼），round 30 之前也完全
+ * 沒有 fence 的概念，所以這裡沒有「要跟既有行為對齊」的相容性負擔，只
+ * 需要滿足「行首 ``` 判定為 code fence」這個單一規則就好，沒有必要為了
+ * 假設性的未來需求擴大解析範圍。
+ */
+export type MarkdownBlock = { type: 'heading'; text: string } | { type: 'paragraph'; text: string }
+
+export function splitMarkdownBlocks(text: string): MarkdownBlock[] {
+  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  const blocks: MarkdownBlock[] = []
+  let paragraphLines: string[] = []
+  let inFence = false
+
+  function flushParagraph() {
+    if (paragraphLines.length === 0) return
+    const joined = paragraphLines.join('\n').trim()
+    if (joined) blocks.push({ type: 'paragraph', text: joined })
+    paragraphLines = []
+  }
+
+  for (const rawLine of lines) {
+    if (rawLine.startsWith('```')) {
+      inFence = !inFence
+      paragraphLines.push(rawLine)
+      continue
+    }
+    if (inFence) {
+      paragraphLines.push(rawLine)
+      continue
+    }
+    if (rawLine.trim() === '') {
+      flushParagraph()
+      continue
+    }
+    if (rawLine.startsWith('## ')) {
+      flushParagraph()
+      blocks.push({ type: 'heading', text: rawLine.slice(3).trim() })
+      continue
+    }
+    paragraphLines.push(rawLine)
+  }
+  flushParagraph()
+
+  return blocks
+}
+
+/**
+ * 把純文字切成區塊。空行分段；以 `## ` 開頭的行視為小標題（見上方
+ * splitMarkdownBlocks() 的完整說明——這裡只負責把區塊轉成信件用的
+ * HTML，不重複切分邏輯）。
  * 回傳陣列而非字串，方便呼叫端把圖片插在第一段之後。
  */
 export function renderBlocks(text: string, font: string): string[] {
-  return text
-    .replace(/\r\n/g, '\n')
-    .split(/\n{2,}/)
-    .map((b) => b.trim())
-    .filter(Boolean)
-    .map((block) =>
-      block.startsWith('## ')
-        ? `<h2 style="margin:28px 0 12px;font-size:16px;line-height:1.5;font-weight:600;color:${BRAND_COLOR};font-family:${font};">${escapeHtml(
-            block.slice(3).trim(),
-          )}</h2>`
-        : `<p style="margin:0 0 16px;font-size:16px;line-height:1.8;color:#2b2f36;font-family:${font};">${linkify(
-            escapeHtml(block),
-          ).replace(/\n/g, '<br>')}</p>`,
-    )
+  return splitMarkdownBlocks(text).map((block) =>
+    block.type === 'heading'
+      ? `<h2 style="margin:28px 0 12px;font-size:16px;line-height:1.5;font-weight:600;color:${BRAND_COLOR};font-family:${font};">${escapeHtml(
+          block.text,
+        )}</h2>`
+      : `<p style="margin:0 0 16px;font-size:16px;line-height:1.8;color:#2b2f36;font-family:${font};">${linkify(
+          escapeHtml(block.text),
+        ).replace(/\n/g, '<br>')}</p>`,
+  )
 }
 
 /** 把一段純文字轉成乾淨的行內 HTML：跳脫文字、網址包成不含樣式的 <a>。 */
@@ -222,15 +319,9 @@ function bodyInlineHtml(text: string): string {
  * 帶樣式進去反而會打架。
  */
 export function renderBodyHtml(bodyText: string): string {
-  return bodyText
-    .replace(/\r\n/g, '\n')
-    .split(/\n{2,}/)
-    .map((b) => b.trim())
-    .filter(Boolean)
+  return splitMarkdownBlocks(bodyText)
     .map((block) =>
-      block.startsWith('## ')
-        ? `<h4>${escapeHtml(block.slice(3).trim())}</h4>`
-        : `<p>${bodyInlineHtml(block)}</p>`,
+      block.type === 'heading' ? `<h4>${escapeHtml(block.text)}</h4>` : `<p>${bodyInlineHtml(block.text)}</p>`,
     )
     .join('\n')
 }

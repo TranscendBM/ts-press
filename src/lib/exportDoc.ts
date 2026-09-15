@@ -20,6 +20,7 @@ import {
   formatReleaseDate,
   safeUrl,
   splitLinks,
+  splitMarkdownBlocks,
   type TemplateInput,
 } from '../../shared/emailTemplate'
 import {
@@ -206,23 +207,21 @@ export async function downloadWord(input: TemplateInput, filename: string) {
     )
   }
 
-  // 內文。「## 」開頭的行是小標題。
-  const blocks = input.bodyText
-    .replace(/\r\n/g, '\n')
-    .split(/\n{2,}/)
-    .map((b) => b.trim())
-    .filter(Boolean)
+  // 內文區塊切分（標題／段落）跟信件、CMS HTML 共用同一套邏輯，見
+  // shared/emailTemplate.ts 的 splitMarkdownBlocks() 說明——不在這裡
+  // 重刻一份會漂移的規則。
+  const blocks = splitMarkdownBlocks(input.bodyText)
 
   const image = input.heroImageUrl ? await loadImage(input.heroImageUrl) : null
 
   blocks.forEach((block, idx) => {
-    if (block.startsWith('## ')) {
+    if (block.type === 'heading') {
       children.push(
         new Paragraph({
           spacing: { before: 320, after: 160 },
           children: [
             new TextRun({
-              text: block.slice(3).trim(),
+              text: block.text,
               bold: true,
               size: 26,
               color: BRAND_HEX,
@@ -232,7 +231,7 @@ export async function downloadWord(input: TemplateInput, filename: string) {
         }),
       )
     } else {
-      children.push(textParagraph(block))
+      children.push(textParagraph(block.text))
     }
 
     // 圖片放在導言之後，與信件版面一致
@@ -464,16 +463,13 @@ export function downloadPdf(input: TemplateInput, filename: string) {
       ? "'Helvetica Neue',Helvetica,Arial,'Microsoft JhengHei','Noto Sans TC',sans-serif"
       : "'Helvetica Neue',Helvetica,Arial,sans-serif"
 
-  const blocks = input.bodyText
-    .replace(/\r\n/g, '\n')
-    .split(/\n{2,}/)
-    .map((b) => b.trim())
-    .filter(Boolean)
-    .map((b) =>
-      b.startsWith('## ')
-        ? `<h2>${escapeHtml(b.slice(3).trim())}</h2>`
-        : `<p>${linkifyHtml(b).replace(/\n/g, '<br>')}</p>`,
-    )
+  // 內文區塊切分（標題／段落）跟信件、CMS HTML、Word 共用同一套邏輯，見
+  // shared/emailTemplate.ts 的 splitMarkdownBlocks() 說明。
+  const blocks = splitMarkdownBlocks(input.bodyText).map((block) =>
+    block.type === 'heading'
+      ? `<h2>${escapeHtml(block.text)}</h2>`
+      : `<p>${linkifyHtml(block.text).replace(/\n/g, '<br>')}</p>`,
+  )
 
   const heroSrc = safeUrl(input.heroImageUrl)
   if (heroSrc) {

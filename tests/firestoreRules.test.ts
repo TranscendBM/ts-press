@@ -691,6 +691,235 @@ describe('firestore.rules — 動態權限矩陣（mediaContacts / mediaEvents /
     })
   })
 
+  // round 30 新增：「US 版本與 WWW 版本保持相同」——client 端如果直接寫
+  // pressReleases（繞過 UI），這裡驗證 usSyncedWithWww:true 但
+  // versions.us 與 versions.www 的 subject／bodyText 其實不一致的寫入
+  // 會被拒絕，見 firestore.rules 的 pressUsSyncConsistent() 說明。
+  describe('pressReleases：usSyncedWithWww 與 versions.us／versions.www 的一致性', () => {
+    it('usSyncedWithWww:true 且 versions.us 與 versions.www 完全一致 → 允許寫入', async () => {
+      await assertSucceeds(
+        setDoc(doc(as('admin@x.com'), 'pressReleases', 'sync-ok'), {
+          usSyncedWithWww: true,
+          versions: {
+            www: { subject: 'A', bodyText: 'B' },
+            us: { subject: 'A', bodyText: 'B' },
+          },
+        }),
+      )
+    })
+
+    it('usSyncedWithWww:true 但 subject 不一致 → 拒絕寫入', async () => {
+      await assertFails(
+        setDoc(doc(as('admin@x.com'), 'pressReleases', 'sync-bad-subject'), {
+          usSyncedWithWww: true,
+          versions: {
+            www: { subject: 'A', bodyText: 'B' },
+            us: { subject: 'X', bodyText: 'B' },
+          },
+        }),
+      )
+    })
+
+    it('usSyncedWithWww:true 但 bodyText 不一致 → 拒絕寫入', async () => {
+      await assertFails(
+        setDoc(doc(as('admin@x.com'), 'pressReleases', 'sync-bad-body'), {
+          usSyncedWithWww: true,
+          versions: {
+            www: { subject: 'A', bodyText: 'B' },
+            us: { subject: 'A', bodyText: 'Y' },
+          },
+        }),
+      )
+    })
+
+    it('usSyncedWithWww:false（明確關閉）→ 即使 US／WWW 內容不同也允許寫入（獨立編輯是合法狀態）', async () => {
+      await assertSucceeds(
+        setDoc(doc(as('admin@x.com'), 'pressReleases', 'sync-off'), {
+          usSyncedWithWww: false,
+          versions: {
+            www: { subject: 'A', bodyText: 'B' },
+            us: { subject: 'X', bodyText: 'Y' },
+          },
+        }),
+      )
+    })
+
+    it('沒有 usSyncedWithWww 欄位（舊資料）→ 即使 US／WWW 內容不同也允許寫入，維持既有行為', async () => {
+      await assertSucceeds(
+        setDoc(doc(as('admin@x.com'), 'pressReleases', 'sync-missing-field'), {
+          versions: {
+            www: { subject: 'A', bodyText: 'B' },
+            us: { subject: 'X', bodyText: 'Y' },
+          },
+        }),
+      )
+    })
+
+    it('三種角色（admin／manager／specialist）都受同一條規則約束', async () => {
+      for (const email of ['admin@x.com', 'manager@x.com', 'spec@x.com']) {
+        await assertFails(
+          setDoc(doc(as(email), 'pressReleases', `sync-bad-${email}`), {
+            usSyncedWithWww: true,
+            versions: {
+              www: { subject: 'A', bodyText: 'B' },
+              us: { subject: 'DIFFERENT', bodyText: 'B' },
+            },
+          }),
+        )
+      }
+    })
+
+    it('update（merge）把已經一致的文件改成不一致 → 同樣拒絕', async () => {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), 'pressReleases', 'sync-update'), {
+          usSyncedWithWww: true,
+          versions: {
+            www: { subject: 'A', bodyText: 'B' },
+            us: { subject: 'A', bodyText: 'B' },
+          },
+        })
+      })
+      await assertFails(
+        setDoc(
+          doc(as('admin@x.com'), 'pressReleases', 'sync-update'),
+          { versions: { www: { subject: 'A', bodyText: 'B' }, us: { subject: 'CHANGED', bodyText: 'B' } } },
+          { merge: true },
+        ),
+      )
+    })
+
+    // 提交前審查修正：pressUsSyncConsistent() 原本用 `!= true` 判斷，會把
+    // 任何非 bool 值（字串 "true"、數字、null、map、array）誤判成「不是
+    // true」而跟 false 一樣放行——等於讓畸形型別偷偷混進資料庫。改成
+    // `is bool` 明確型別檢查後，這裡驗證每一種常見的非 bool 值都會讓
+    // 整筆 create 被拒絕，即使 versions.us／versions.www 內容其實一致
+    // 也一樣拒絕（因為錯誤點在型別本身，不在內容是否一致）。
+    it.each([
+      ['字串 "true"', 'true'],
+      ['數字 1', 1],
+      ['null', null],
+      ['map', { value: true }],
+      ['array', [true]],
+    ])('usSyncedWithWww 是非 bool 型別（%s）→ 整筆拒絕，不當 false 放行', async (_label, badValue) => {
+      await assertFails(
+        setDoc(doc(as('admin@x.com'), 'pressReleases', `sync-badtype-${_label}`), {
+          usSyncedWithWww: badValue,
+          versions: {
+            www: { subject: 'A', bodyText: 'B' },
+            us: { subject: 'A', bodyText: 'B' },
+          },
+        }),
+      )
+    })
+
+    it('usSyncedWithWww:true 但 versions／versions.www／versions.us 不是 map → fail closed 拒絕', async () => {
+      await assertFails(
+        setDoc(doc(as('admin@x.com'), 'pressReleases', 'sync-versions-not-map'), {
+          usSyncedWithWww: true,
+          versions: 'not-a-map',
+        }),
+      )
+      await assertFails(
+        setDoc(doc(as('admin@x.com'), 'pressReleases', 'sync-www-not-map'), {
+          usSyncedWithWww: true,
+          versions: {
+            www: 'not-a-map',
+            us: { subject: 'A', bodyText: 'B' },
+          },
+        }),
+      )
+      await assertFails(
+        setDoc(doc(as('admin@x.com'), 'pressReleases', 'sync-us-not-map'), {
+          usSyncedWithWww: true,
+          versions: {
+            www: { subject: 'A', bodyText: 'B' },
+            us: 123,
+          },
+        }),
+      )
+    })
+
+    it('usSyncedWithWww:true 但 subject／bodyText 缺失或型別錯誤 → fail closed 拒絕', async () => {
+      await assertFails(
+        setDoc(doc(as('admin@x.com'), 'pressReleases', 'sync-subject-missing'), {
+          usSyncedWithWww: true,
+          versions: {
+            www: { bodyText: 'B' },
+            us: { subject: 'A', bodyText: 'B' },
+          },
+        }),
+      )
+      await assertFails(
+        setDoc(doc(as('admin@x.com'), 'pressReleases', 'sync-bodytext-wrong-type'), {
+          usSyncedWithWww: true,
+          versions: {
+            www: { subject: 'A', bodyText: 42 },
+            us: { subject: 'A', bodyText: 42 },
+          },
+        }),
+      )
+    })
+
+    it('create／完整覆寫 update／merge update 都不能繞過一致性檢查', async () => {
+      // create：直接建立不一致的文件
+      await assertFails(
+        setDoc(doc(as('admin@x.com'), 'pressReleases', 'sync-bypass-create'), {
+          usSyncedWithWww: true,
+          versions: {
+            www: { subject: 'A', bodyText: 'B' },
+            us: { subject: 'DIFF', bodyText: 'B' },
+          },
+        }),
+      )
+
+      // 完整覆寫（非 merge）：先用一致的內容建立，再整份覆寫成不一致
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), 'pressReleases', 'sync-bypass-fullupdate'), {
+          usSyncedWithWww: true,
+          versions: {
+            www: { subject: 'A', bodyText: 'B' },
+            us: { subject: 'A', bodyText: 'B' },
+          },
+        })
+      })
+      await assertFails(
+        setDoc(doc(as('admin@x.com'), 'pressReleases', 'sync-bypass-fullupdate'), {
+          usSyncedWithWww: true,
+          versions: {
+            www: { subject: 'A', bodyText: 'B' },
+            us: { subject: 'DIFF', bodyText: 'B' },
+          },
+        }),
+      )
+
+      // merge update：已涵蓋於上方「update（merge）把已經一致的文件改成
+      // 不一致 → 同樣拒絕」測試，這裡不重複。
+    })
+
+    it('usSyncedWithWww 相關檢查不影響既有角色／未登入權限：沒有 editPress 或未登入一律拒絕，跟內容是否一致無關', async () => {
+      await assertFails(
+        setDoc(doc(env.unauthenticatedContext().firestore(), 'pressReleases', 'sync-anon'), {
+          usSyncedWithWww: true,
+          versions: {
+            www: { subject: 'A', bodyText: 'B' },
+            us: { subject: 'A', bodyText: 'B' },
+          },
+        }),
+      )
+
+      await setOverrides({ specialist: { editPress: false } })
+      await assertFails(
+        setDoc(doc(as('spec@x.com'), 'pressReleases', 'sync-no-editpress'), {
+          usSyncedWithWww: true,
+          versions: {
+            www: { subject: 'A', bodyText: 'B' },
+            us: { subject: 'A', bodyText: 'B' },
+          },
+        }),
+      )
+    })
+  })
+
   describe('管理員撤銷權限後立即生效（使用者仍在白名單）', () => {
     it('撤銷 spec 的 editPress 後不能再寫 pressReleases，但仍能讀', async () => {
       await setOverrides({ specialist: { editPress: false } })

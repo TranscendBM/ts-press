@@ -204,6 +204,66 @@ service cloud.firestore {
         && v.matches('^https://[^\\s]+$');
     }
 
+    /**
+     * round 30 新增，提交前審查修正型別判斷：「US 版本與 WWW 版本保持
+     * 相同」（見 src/lib/pressContentSync.ts 的完整說明）——client 端如果
+     * 直接寫 pressReleases（例如繞過 UI、用瀏覽器 console 呼叫 Firestore
+     * SDK），這裡必須擋下「usSyncedWithWww:true 但 versions.us 的
+     * subject／bodyText 其實跟 versions.www 不一致」的寫入，不能只靠前端
+     * UI 的 canonicalize 邏輯——那段邏輯繞得過去（前端程式碼不是安全
+     * 邊界）。
+     *
+     * 確定的型別語意（不得把非 bool 當 false 放行）：
+     * - 完全沒有 usSyncedWithWww 欄位：視為舊資料，等同 false，直接放行，
+     *   不檢查內容一致性——維持既有的獨立編輯行為。
+     * - 欄位存在，且確實是布林值：
+     *   - false → 放行，允許 WWW／US 內容不同（獨立編輯是合法狀態）。
+     *   - true → 必須 versions.www／versions.us 的 subject／bodyText
+     *     完全相同（且兩邊都必須是合法字串，不能其中一邊型別錯誤卻恰好
+     *     等於另一邊而僥倖通過）才放行。
+     * - 欄位存在，但不是布林值（字串 "true"、數字、null、map、array……
+     *   任何非 bool 的型別）：**整筆 create／update 直接拒絕**——這是
+     *   提交前審查發現的修正重點：舊版用 `!= true` 判斷，非布林值會被
+     *   誤判成「不是 true」而跟 false 一樣放行，等於讓畸形 schema 偷偷
+     *   混進資料庫。改用 `is bool` 明確驗證型別，跟這個檔案裡
+     *   validUserDoc()（32 行）／validPermissionMap()（96-105 行）已經
+     *   建立的既有慣例一致，不再是這個檔案裡唯一沒有做型別驗證的欄位。
+     */
+    function pressUsSyncConsistent(data) {
+      return !('usSyncedWithWww' in data)
+        || (
+          data.usSyncedWithWww is bool
+          && (
+            data.usSyncedWithWww == false
+            || pressVersionsMatchForSync(data)
+          )
+        );
+    }
+
+    /**
+     * WWW／US 的 subject／bodyText 是否都是合法字串、且彼此完全相同——
+     * 只有 pressUsSyncConsistent() 確認 usSyncedWithWww===true 時才會呼叫
+     * 到這裡。明確用 `is map`／`is string` 逐層驗證，不依賴「存取不存在
+     * 的欄位會拋錯、Firestore Rules 對錯誤預設視為拒絕」這種隱性行為——
+     * 即使 versions／www／us 缺失或不是 map，這裡也會在真正做字串比較
+     * 之前就先被 `is map`／`is string` 擋下，明確回傳 false（拒絕），
+     * 不必仰賴 runtime error 的隱性 fail-closed。這也連帶處理了「兩邊
+     * subject／bodyText 型別都錯、但錯得剛好一樣」這種邊界情況——只有
+     * 兩邊都先通過 `is string` 才會進入比較，不會有「兩個非字串值恰好
+     * `==` 相等就被誤判成一致」的漏洞。
+     */
+    function pressVersionsMatchForSync(data) {
+      return data.versions is map
+        && data.versions.www is map
+        && data.versions.us is map
+        && data.versions.www.subject is string
+        && data.versions.us.subject is string
+        && data.versions.www.bodyText is string
+        && data.versions.us.bodyText is string
+        && data.versions.www.subject == data.versions.us.subject
+        && data.versions.www.bodyText == data.versions.us.bodyText;
+    }
+
     match /settings/branding {
       allow read: if true;
       // 只收 logoUrl 與 updatedAt，多一個欄位就整筆拒絕
@@ -231,9 +291,12 @@ service cloud.firestore {
 
     // 新聞稿：讀取需要 viewPress，新增／修改／刪除需要 editPress ——
     // 兩者分開是因為權限矩陣允許某些角色只看不改。
+    // round 30 新增：create／update 額外要求 pressUsSyncConsistent()——
+    // 見該函式說明，delete 不涉及內容一致性，不需要這個檢查。
     match /pressReleases/{id} {
       allow read: if hasPerm('viewPress');
-      allow create, update, delete: if hasPerm('editPress');
+      allow create, update: if hasPerm('editPress') && pressUsSyncConsistent(request.resource.data);
+      allow delete: if hasPerm('editPress');
     }
 
     // Storage 清理失敗時的重試佇列，只由 deletePressRelease（Admin SDK）寫入。
