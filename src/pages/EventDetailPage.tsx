@@ -215,12 +215,12 @@ export default function EventDetailPage() {
         }
       />
 
-      <div className="p-8">
+      <div className="p-4 sm:p-6 lg:p-8">
         <div className="mb-5 flex flex-wrap items-center gap-3">
           <Select
             value={listFilter}
             onChange={(e) => setListFilter(e.target.value as ListId | 'all')}
-            className="w-40"
+            className="w-full sm:w-40"
           >
             <option value="all">全部名單</option>
             {LISTS.map((l) => (
@@ -240,13 +240,13 @@ export default function EventDetailPage() {
             只看已標記
           </label>
 
-          <div className="relative ml-auto w-64">
+          <div className="relative w-full sm:ml-auto sm:w-64">
             <Search className="absolute top-2.5 left-3 size-4 text-slate-400" />
             <TextInput
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="搜尋媒體或姓名…"
-              className="pl-9"
+              className="w-full pl-9"
             />
           </div>
         </div>
@@ -308,7 +308,7 @@ export default function EventDetailPage() {
               placeholder="2026 中秋禮品"
             />
           </Field>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Field label="類型">
               <Select
                 value={form.type}

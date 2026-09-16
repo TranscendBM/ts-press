@@ -314,7 +314,7 @@ export default function ContactsPage() {
         }
       />
 
-      <div className="p-8">
+      <div className="p-4 sm:p-6 lg:p-8">
         <div className="mb-5 flex flex-wrap items-center gap-3">
           <div className="flex flex-wrap gap-1 rounded-lg bg-slate-100 p-1">
             <TabButton active={tab === 'all'} onClick={() => setTab('all')}>
@@ -331,13 +331,13 @@ export default function ContactsPage() {
             ))}
           </div>
 
-          <div className="relative ml-auto w-64">
+          <div className="relative w-full sm:ml-auto sm:w-64">
             <Search className="absolute top-2.5 left-3 size-4 text-slate-400" />
             <TextInput
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="搜尋姓名、Email、媒體…"
-              className="pl-9"
+              className="w-full pl-9"
             />
           </div>
         </div>
@@ -356,7 +356,96 @@ export default function ContactsPage() {
             }
           />
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+          <>
+            {/* round 31：手機（<md）改成卡片列表，保留星號、狀態、主要操作；
+                md 以上維持原本的 table，見下方 hidden md:block 區塊。 */}
+            <div className="space-y-2 md:hidden">
+              {visible.map((c) => (
+                <div
+                  key={c.id}
+                  onClick={() => setDetail(c)}
+                  className={`cursor-pointer rounded-xl border border-slate-200 bg-white p-4 transition hover:border-brand-200 ${
+                    c.active === false ? 'opacity-45' : ''
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex min-w-0 items-start gap-2">
+                      <button
+                        onClick={(e) => toggleStar(e, c)}
+                        title={c.starred ? '取消重要窗口' : '標記為重要窗口'}
+                        aria-label={c.starred ? '取消重要窗口' : '標記為重要窗口'}
+                        className={`-m-1 flex size-9 shrink-0 items-center justify-center rounded p-1 transition ${
+                          c.starred
+                            ? 'text-amber-400 hover:text-amber-500'
+                            : 'text-slate-200 hover:text-slate-400'
+                        }`}
+                      >
+                        <Star
+                          className="size-4"
+                          fill={c.starred ? 'currentColor' : 'none'}
+                        />
+                      </button>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="font-medium break-words text-slate-900">
+                            {c.outlet || '—'}
+                          </span>
+                          {c.active === false && (
+                            <span className="text-xs text-slate-400">（停用）</span>
+                          )}
+                          {c.rank != null && (
+                            <span className="text-xs text-slate-400">
+                              重要性 {c.rank}
+                            </span>
+                          )}
+                        </div>
+                        <div
+                          className="mt-0.5 text-sm break-words text-slate-700"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            openEdit(c)
+                          }}
+                        >
+                          {c.name || (
+                            <span className="text-slate-400">（未填姓名）</span>
+                          )}
+                          {c.title && (
+                            <span className="text-slate-400"> · {c.title}</span>
+                          )}
+                        </div>
+                        <div className="mt-1 text-xs break-all text-slate-400">
+                          {c.email}
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {c.mediaType && c.mediaType !== 'other' && (
+                            <Badge>{MEDIA_TYPE_LABELS[c.mediaType]}</Badge>
+                          )}
+                          {(c.lists ?? []).map((l) => (
+                            <Badge key={l} tone="blue">
+                              {LIST_LABELS[l]}
+                            </Badge>
+                          ))}
+                          <Badge tone="slate">{LANGUAGE_LABELS[c.language]}</Badge>
+                        </div>
+                      </div>
+                    </div>
+                    <div
+                      className="flex shrink-0 gap-1"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <IconBtn onClick={() => openEdit(c)} label="編輯">
+                        <Pencil className="size-4" />
+                      </IconBtn>
+                      <IconBtn onClick={() => remove(c)} label="刪除" danger>
+                        <Trash2 className="size-4" />
+                      </IconBtn>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+          <div className="hidden overflow-x-auto rounded-xl border border-slate-200 bg-white md:block">
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-left text-xs text-slate-500">
                 <tr>
@@ -478,6 +567,7 @@ export default function ContactsPage() {
               </tbody>
             </table>
           </div>
+          </>
         )}
       </div>
 
@@ -553,7 +643,7 @@ function ContactModal({
       }
     >
       <div className="space-y-4">
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Field label="姓名 *">
             <TextInput
               value={draft.name}
@@ -603,7 +693,7 @@ function ContactModal({
           </Field>
         </div>
 
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Field label="媒體類型">
             <Select
               value={draft.mediaType ?? 'other'}
@@ -793,7 +883,7 @@ function ImportModal({
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder="或直接貼上 CSV 內容…"
-          className="font-mono text-xs"
+          className="w-full font-mono text-xs"
         />
 
         {parsed && parsed.errors.length > 0 && (

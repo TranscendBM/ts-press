@@ -223,7 +223,7 @@ export default function PressListPage() {
         }
       />
 
-      <div className="p-8">
+      <div className="p-4 sm:p-6 lg:p-8">
         {error && (
           <div className="mb-5 rounded-lg bg-red-50 p-3 text-sm text-red-700">
             {error}
@@ -233,7 +233,7 @@ export default function PressListPage() {
           <Select
             value={category}
             onChange={(e) => setCategory(e.target.value as Category | 'all')}
-            className="w-44"
+            className="w-full sm:w-44"
           >
             <option value="all">全部分類</option>
             {CATEGORIES.map((c) => (
@@ -245,7 +245,7 @@ export default function PressListPage() {
           <Select
             value={year}
             onChange={(e) => setYear(e.target.value)}
-            className="w-36"
+            className="w-full sm:w-36"
           >
             <option value="all">全部年份</option>
             {years.map((y) => (

@@ -37,7 +37,7 @@ export default function RequirePermission({
 
 function Forbidden() {
   return (
-    <div className="flex min-h-[60vh] flex-col items-center justify-center gap-2 p-8 text-center">
+    <div className="flex min-h-[60vh] flex-col items-center justify-center gap-2 p-4 text-center sm:p-8">
       <p className="text-lg font-semibold text-slate-800">403 沒有存取權限</p>
       <p className="text-sm text-slate-500">
         你的角色目前沒有任何可用的功能，請聯絡管理員確認權限設定。

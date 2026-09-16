@@ -148,7 +148,7 @@ export default function SchedulePage() {
         description="全隊共用的新聞稿發送時程，即時同步。實際寄送仍需由人手動發送。"
       />
 
-      <div className="p-8">
+      <div className="p-4 sm:p-6 lg:p-8">
         {loading ? (
           <p className="py-16 text-center text-sm text-slate-400">載入中…</p>
         ) : nothing ? (

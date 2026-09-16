@@ -21,7 +21,7 @@ export function Button({
   return (
     <button
       {...props}
-      className={`inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed ${VARIANTS[variant]} ${className}`}
+      className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed ${VARIANTS[variant]} ${className}`}
     />
   )
 }
@@ -120,22 +120,32 @@ export function Modal({
 }) {
   if (!open) return null
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-6">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-3 sm:p-6">
+      {/*
+       * round 31：改成 flex-col + max-h，讓標題列與底部操作列固定，只有
+       * 中間內容區在內容過長時自己捲動——修改前是整個 overlay 用
+       * overflow-y-auto，內容一長，標題跟底部確認／取消按鈕會直接被捲出
+       * 畫面外，手機上尤其容易發生（見 CSV 匯入、預覽 iframe 等長內容
+       * modal）。
+       */}
       <div
-        className={`my-8 w-full rounded-2xl bg-white shadow-2xl ${wide ? 'max-w-3xl' : 'max-w-lg'}`}
+        className={`flex max-h-[calc(100vh-1.5rem)] w-full flex-col rounded-2xl bg-white shadow-2xl sm:max-h-[85vh] ${wide ? 'max-w-3xl' : 'max-w-lg'}`}
       >
-        <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
-          <h2 className="text-base font-semibold text-slate-900">{title}</h2>
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-200 px-4 py-4 sm:px-6">
+          <h2 className="min-w-0 break-words text-base font-semibold text-slate-900">
+            {title}
+          </h2>
           <button
             onClick={onClose}
-            className="rounded-lg p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+            aria-label="關閉"
+            className="flex size-10 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
           >
             <X className="size-5" />
           </button>
         </div>
-        <div className="px-6 py-5">{children}</div>
+        <div className="overflow-y-auto px-4 py-5 sm:px-6">{children}</div>
         {footer && (
-          <div className="flex justify-end gap-2 border-t border-slate-200 px-6 py-4">
+          <div className="flex shrink-0 flex-col gap-2 border-t border-slate-200 px-4 py-4 sm:flex-row sm:justify-end sm:px-6 [&>button]:w-full sm:[&>button]:w-auto">
             {footer}
           </div>
         )}

@@ -69,7 +69,7 @@ export default function RolePermissionsCard() {
   const dirty = JSON.stringify(matrix) !== JSON.stringify(saved)
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-6">
+    <div className="rounded-xl border border-slate-200 bg-white p-4 sm:p-6">
       <div className="mb-1 flex items-center gap-2">
         <ShieldCheck className="size-4 text-slate-400" />
         <h2 className="text-sm font-semibold text-slate-800">角色權限</h2>
