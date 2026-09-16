@@ -132,12 +132,12 @@ export default function EventMatrixPage() {
         }
       />
 
-      <div className="p-8">
+      <div className="p-4 sm:p-6 lg:p-8">
         <div className="mb-5 flex flex-wrap items-center gap-3">
           <Select
             value={type}
             onChange={(e) => setType(e.target.value as EventType | 'all')}
-            className="w-44"
+            className="w-full sm:w-44"
           >
             <option value="all">全部類型</option>
             {EVENT_TYPES.map((t) => (
@@ -150,7 +150,7 @@ export default function EventMatrixPage() {
           <Select
             value={listFilter}
             onChange={(e) => setListFilter(e.target.value as ListId | 'all')}
-            className="w-40"
+            className="w-full sm:w-40"
           >
             <option value="all">全部名單</option>
             {LISTS.map((l) => (

@@ -143,7 +143,7 @@ export default function EventsPage() {
         }
       />
 
-      <div className="p-8">
+      <div className="p-4 sm:p-6 lg:p-8">
         {error && (
           <div className="mb-5 rounded-lg bg-red-50 p-3 text-sm text-red-700">
             {error}
@@ -153,7 +153,7 @@ export default function EventsPage() {
           <Select
             value={typeFilter}
             onChange={(e) => setTypeFilter(e.target.value as EventType | 'all')}
-            className="w-44"
+            className="w-full sm:w-44"
           >
             <option value="all">全部類型</option>
             {EVENT_TYPES.map((t) => (
@@ -169,7 +169,7 @@ export default function EventsPage() {
                 e.target.value === 'all' ? 'all' : Number(e.target.value),
               )
             }
-            className="w-36"
+            className="w-full sm:w-36"
           >
             <option value="all">全部年份</option>
             {years.map((y) => (
@@ -273,7 +273,7 @@ export default function EventsPage() {
               placeholder="2026 中秋禮品"
             />
           </Field>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Field label="類型">
               <Select
                 value={draft.type}

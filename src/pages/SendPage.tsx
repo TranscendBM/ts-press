@@ -217,7 +217,7 @@ export default function SendPage() {
         description={`透過公司 mail2000 寄出，一位記者一封獨立信件；記者回信會進 ${REPLY_TO_EMAIL}。`}
       />
 
-      <div className="max-w-4xl space-y-6 p-8">
+      <div className="max-w-4xl space-y-6 p-4 sm:p-6 lg:p-8">
         {message && (
           <div
             className={`rounded-lg p-3 text-sm ${
@@ -355,7 +355,7 @@ export default function SendPage() {
               </span>
             </div>
           )}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {/* 測試名單不出現在這裡，只能由上方的測試按鈕觸發 */}
             {LISTS.filter((l) => !INTERNAL_LISTS.includes(l)).map((l) => {
               const count = contacts.filter(
@@ -500,7 +500,7 @@ function Card({
   children: React.ReactNode
 }) {
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-6">
+    <div className="rounded-xl border border-slate-200 bg-white p-4 sm:p-6">
       <div className="mb-4 flex items-center gap-3">
         <span className="flex size-6 items-center justify-center rounded-full bg-brand-600 text-xs font-semibold text-white">
           {step}

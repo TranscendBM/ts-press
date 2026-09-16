@@ -26,7 +26,7 @@ export default function LoginPage() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-linear-to-br from-slate-100 to-brand-50 p-6">
-      <div className="w-full max-w-md rounded-2xl bg-white p-10 shadow-xl shadow-slate-200/60">
+      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl shadow-slate-200/60 sm:p-10">
         <div className="mb-8 flex flex-col items-center text-center">
           {uiLogoUrl ? (
             <img

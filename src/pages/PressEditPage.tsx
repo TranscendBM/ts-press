@@ -467,14 +467,14 @@ export default function PressEditPage() {
         }
       />
 
-      <div className="p-8">
+      <div className="p-4 sm:p-6 lg:p-8">
         {error && (
           <div className="mb-5 rounded-lg bg-red-50 p-3 text-sm text-red-700">
             {error}
           </div>
         )}
 
-        <div className="mb-6 grid grid-cols-2 gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:grid-cols-6">
+        <div className="mb-6 grid grid-cols-2 gap-4 rounded-xl border border-slate-200 bg-white p-4 sm:grid-cols-6 sm:p-5">
           <div className="col-span-2">
             <Field label="稿件標題（僅供後台辨識）">
               <TextInput
@@ -563,7 +563,7 @@ export default function PressEditPage() {
             })}
           </div>
 
-          <div className="space-y-5 p-5">
+          <div className="space-y-5 p-4 sm:p-5">
             {lang === 'us' && (
               <label className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">
                 <input
@@ -661,9 +661,9 @@ export default function PressEditPage() {
           </div>
         </div>
 
-        <div className="mt-6 rounded-xl border border-slate-200 bg-white p-5">
-          <div className="mb-3 flex items-center justify-between">
-            <div>
+        <div className="mt-6 rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
               <h3 className="text-sm font-semibold text-slate-800">
                 郵件附件
               </h3>

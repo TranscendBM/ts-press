@@ -253,7 +253,7 @@ export default function CampaignDetailPage() {
         }
       />
 
-      <div className="space-y-6 p-8">
+      <div className="space-y-6 p-4 sm:p-6 lg:p-8">
         {retryError && (
           <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
             {retryError}
@@ -289,7 +289,7 @@ export default function CampaignDetailPage() {
           </div>
         )}
 
-        <div className="grid grid-cols-5 gap-4">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
           <Stat label="收件人" value={String(t.recipients)} />
           <Stat label="成功送出" value={String(t.sent)} />
           <Stat label="待重試" value={String(t.failed ?? 0)} />
@@ -310,7 +310,63 @@ export default function CampaignDetailPage() {
           )}
         </div>
 
-        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+        {/* round 31：手機（<md）改成卡片列表，保留狀態與人工處理操作；
+            md 以上維持原本的 table。 */}
+        <div className="space-y-2 md:hidden">
+          {recipients.map((r) => (
+            <div
+              key={r.email}
+              className="rounded-xl border border-slate-200 bg-white p-4"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="font-medium break-words text-slate-900">
+                    {r.name}
+                  </div>
+                  <div className="text-xs break-all text-slate-500">{r.email}</div>
+                </div>
+                <Badge tone={STATUS_TONES[r.status]}>{STATUS_LABELS[r.status]}</Badge>
+              </div>
+              <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-slate-500">
+                <div>
+                  <dt className="text-slate-400">媒體</dt>
+                  <dd className="break-words text-slate-700">{r.outlet}</dd>
+                </div>
+                <div>
+                  <dt className="text-slate-400">語言</dt>
+                  <dd className="text-slate-700">{r.language}</dd>
+                </div>
+                <div>
+                  <dt className="text-slate-400">嘗試次數</dt>
+                  <dd className="text-slate-700">
+                    {r.attemptCount ?? (r.status === 'sent' ? 1 : 0)}
+                  </dd>
+                </div>
+              </dl>
+              {r.lastError && (
+                <div className="mt-2 text-xs break-words text-red-500">{r.lastError}</div>
+              )}
+              {r.status === 'delivery_unknown' && isAdmin && resolutionEligible && (
+                <div className="mt-2 flex gap-4 text-xs">
+                  <button
+                    onClick={() => openResolveModal(r, 'mark_delivered')}
+                    className="font-medium text-emerald-700 hover:underline"
+                  >
+                    標記已送達
+                  </button>
+                  <button
+                    onClick={() => openResolveModal(r, 'force_retry')}
+                    className="font-medium text-red-700 hover:underline"
+                  >
+                    強制重寄
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div className="hidden overflow-x-auto rounded-xl border border-slate-200 bg-white md:block">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs text-slate-500">
               <tr>
@@ -427,6 +483,7 @@ export default function CampaignDetailPage() {
                 onChange={(e) => setResolveReason(e.target.value)}
                 rows={3}
                 placeholder="例如：已致電確認記者已收到這封信"
+                className="w-full"
               />
             </label>
 

@@ -64,7 +64,7 @@ export default function CampaignsPage() {
         }
       />
 
-      <div className="p-8">
+      <div className="p-4 sm:p-6 lg:p-8">
         {loading ? (
           <p className="py-16 text-center text-sm text-slate-400">載入中…</p>
         ) : visible.length === 0 ? (
@@ -73,7 +73,63 @@ export default function CampaignsPage() {
             description="發送新聞稿之後，這裡會顯示每一次的成效。"
           />
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+          <>
+            {/* round 31：手機（<md）改成卡片列表，md 以上維持 table。 */}
+            <div className="space-y-2 md:hidden">
+              {visible.map((c) => {
+                const total = c.totals?.recipients || 0
+                const failed = (c.totals?.failed ?? 0) + (c.totals?.exhausted ?? 0)
+                return (
+                  <div
+                    key={c.id}
+                    onClick={() => navigate(`/campaigns/${c.id}`)}
+                    className="cursor-pointer rounded-xl border border-slate-200 bg-white p-4 transition hover:border-brand-200"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="font-medium break-words text-slate-900">
+                          {c.pressTitle}
+                        </div>
+                        <div className="mt-0.5 flex flex-wrap items-center gap-2">
+                          <span className="text-xs text-slate-400">
+                            {CATEGORY_LABELS[c.category]}
+                          </span>
+                          {c.isTest && <Badge tone="amber">測試信</Badge>}
+                        </div>
+                      </div>
+                      <Badge tone={STATUS_TONES[c.status]}>
+                        {STATUS_LABELS[c.status]}
+                      </Badge>
+                    </div>
+                    <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-slate-500">
+                      <div>
+                        <dt className="text-slate-400">名單</dt>
+                        <dd className="break-words text-slate-700">
+                          {(c.targetLists ?? []).map((l) => LIST_LABELS[l]).join('、') || '—'}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-slate-400">發送時間</dt>
+                        <dd className="text-slate-700">{formatDate(c.sentAt)}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-slate-400">收件人</dt>
+                        <dd className="text-slate-700">{total}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-slate-400">成功 / 失敗</dt>
+                        <dd className="font-medium text-slate-800">
+                          {c.totals?.sent ?? 0}
+                          {failed > 0 && <span className="text-red-600"> / {failed}</span>}
+                        </dd>
+                      </div>
+                    </dl>
+                  </div>
+                )
+              })}
+            </div>
+
+          <div className="hidden overflow-x-auto rounded-xl border border-slate-200 bg-white md:block">
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-left text-xs text-slate-500">
                 <tr>
@@ -134,6 +190,7 @@ export default function CampaignsPage() {
               </tbody>
             </table>
           </div>
+          </>
         )}
       </div>
     </>

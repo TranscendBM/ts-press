@@ -134,7 +134,7 @@ export default function SettingsPage() {
         }
       />
 
-      <div className="space-y-6 p-8">
+      <div className="space-y-6 p-4 sm:p-6 lg:p-8">
         <RolePermissionsCard />
         <PressContactsCard />
         <InternalCopyCard />
@@ -174,10 +174,72 @@ export default function SettingsPage() {
           </div>
         )}
 
-        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+        <div className="rounded-xl border border-slate-200 bg-white">
           <div className="border-b border-slate-200 px-4 py-3">
             <h2 className="text-sm font-semibold text-slate-800">使用者</h2>
           </div>
+
+          {/* round 31：手機（<md）改成卡片列表，md 以上維持原本的 table。 */}
+          <div className="space-y-2 p-3 md:hidden">
+            {users.map((u) => (
+              <div
+                key={u.email}
+                className={`rounded-xl border border-slate-200 p-4 ${u.active ? '' : 'opacity-50'}`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="font-medium break-words text-slate-900">
+                      {u.displayName}
+                      {isSelf(u) && (
+                        <span className="ml-2 text-xs font-normal text-slate-400">
+                          （你自己）
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs break-all text-slate-500">{u.email}</div>
+                  </div>
+                  <button
+                    onClick={() => remove(u)}
+                    className="shrink-0 rounded-lg p-2 text-slate-300 transition hover:bg-red-50 hover:text-red-600"
+                    title="移除"
+                    aria-label="移除"
+                  >
+                    <Trash2 className="size-4" />
+                  </button>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <Select
+                    value={normalizeRole(u.role) ?? 'specialist'}
+                    onChange={(e) => changeRole(u, e.target.value as Role)}
+                    disabled={isSelf(u)}
+                    title={isSelf(u) ? '不能變更自己的角色' : undefined}
+                    className="w-32 disabled:bg-slate-50 disabled:text-slate-400"
+                  >
+                    {ROLES.map((r) => (
+                      <option key={r} value={r}>
+                        {ROLE_LABELS[r]}
+                      </option>
+                    ))}
+                  </Select>
+                  {canSendReal(u.role) ? (
+                    <Badge tone="green">可發送</Badge>
+                  ) : (
+                    <span className="text-xs text-slate-400">不可發送</span>
+                  )}
+                  <button
+                    onClick={() => toggleActive(u)}
+                    disabled={isSelf(u) && u.active}
+                    title={isSelf(u) && u.active ? '不能停用自己的帳號' : undefined}
+                    className="text-xs text-slate-500 underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:no-underline disabled:opacity-50"
+                  >
+                    {u.active ? '啟用中' : '已停用'}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="hidden overflow-x-auto md:block">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs text-slate-500">
               <tr>
@@ -218,9 +280,9 @@ export default function SettingsPage() {
                   </td>
                   <td className="px-4 py-3">
                     {canSendReal(u.role) ? (
-                      <Badge tone="green">是</Badge>
+                      <Badge tone="green">可發送</Badge>
                     ) : (
-                      <span className="text-slate-400">否</span>
+                      <span className="text-slate-400">不可發送</span>
                     )}
                   </td>
                   <td className="px-4 py-3">
@@ -248,6 +310,7 @@ export default function SettingsPage() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       </div>
 
