@@ -564,7 +564,12 @@ export default function PressEditPage() {
           </div>
 
           <div className="space-y-5 p-4 sm:p-5">
-            {lang === 'us' && (
+            {/* round 32：這顆勾選框決定的是「WWW 內容要不要輸出到 US」，
+                是 WWW 這邊的動作/決定，所以放在 WWW 分頁；US 分頁只呈現
+                同步後唯讀的結果與提示，不重複放勾選框。checkbox 本身的
+                行為完全沒變——見 canonicalizePressForSync() 與 patch()
+                的說明。 */}
+            {lang === 'www' && (
               <label className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">
                 <input
                   type="checkbox"
@@ -587,7 +592,7 @@ export default function PressEditPage() {
               label="信件主旨"
               hint={
                 usReadOnly
-                  ? '此欄位與 WWW 版本同步中，如需個別編輯請先取消上方勾選。'
+                  ? '此欄位與 WWW 版本同步中，如需個別編輯請先到 WWW 分頁取消「US 版本與 WWW 版本保持相同」的勾選。'
                   : '按 Enter 可手動斷行；斷行只顯示在信件內文、Word、PDF 的大標題，收件匣看到的主旨仍是一行。'
               }
             >
@@ -607,7 +612,7 @@ export default function PressEditPage() {
               label="內文"
               hint={
                 usReadOnly
-                  ? '此欄位與 WWW 版本同步中，如需個別編輯請先取消上方勾選。'
+                  ? '此欄位與 WWW 版本同步中，如需個別編輯請先到 WWW 分頁取消「US 版本與 WWW 版本保持相同」的勾選。'
                   : '空一行代表分段。開頭加「## 」的行會變成小標題。網址會自動變成連結。'
               }
             >
