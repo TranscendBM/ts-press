@@ -24,6 +24,7 @@
     "docx": "^9.7.1",
     "firebase": "^12.16.0",
     "lucide-react": "^1.25.0",
+    "mammoth": "^1.12.3",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-router-dom": "^7.18.1"
@@ -37,6 +38,7 @@
     "@vitejs/plugin-react": "^6.0.3",
     "@vitest/coverage-v8": "^4.1.10",
     "firebase-tools": "^15.24.0",
+    "jsdom": "^30.1.1",
     "oxlint": "^1.71.0",
     "tailwindcss": "^4.3.3",
     "typescript": "~6.0.2",
