@@ -5,7 +5,7 @@ import {
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing'
 import { readFileSync } from 'node:fs'
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest'
+import { afterAll, beforeAll, describe, it } from 'vitest'
 import {
   deleteObject,
   getMetadata,
@@ -26,21 +26,19 @@ import { doc, setDoc } from 'firebase/firestore'
  * `npm run test:unit`）已經用獨立的 vitest.config.ts 排除這個檔案，
  * 沒裝 Java 的機器一樣能跑。
  *
- * storage.rules 現在會用 firestore.get() 讀 (default) Firestore 資料庫的
- * users／settings/permissions，所以這裡要同時啟動 firestore 與 storage
- * 兩個模擬器、共用同一個 projectId，測試前用 withSecurityRulesDisabled()
- * 把白名單與權限矩陣資料寫進 Firestore，Storage 規則才讀得到。
+ * round 33 修正（緊急）：storage.rules 不再用 firestore.get() 跨服務讀
+ * Firestore，改成只讀 request.auth.token 裡的 custom claims
+ * （pressCenter／role，由 functions/src/index.ts 的 syncUserClaims／
+ * onUserCreated／applyClaim() 維護）——見 storage.rules 檔案開頭的完整
+ * 說明。這裡的 authenticatedContext() 第二個參數就是在模擬「使用者目前
+ * 的 ID token 帶著哪些 claims」，不需要、也不應該再另外 seed Firestore
+ * 的 users 文件才能讓 Storage 規則放行。
  *
- * ⚠️ 這個 projectId 必須跟 package.json 的 `test:rules` 腳本裡
- * `firebase emulators:exec --project <id>` 的 <id> 完全一致 —— 實測發現
- * Storage 模擬器的 firestore.get() 跨服務呼叫，是解析到「啟動整個模擬器
- * session 時的 --project」那個專案的 Firestore 資料，而不是這個檔案自己
- * 呼叫 initializeTestEnvironment() 時宣告的 projectId（這點跟 Firestore
- * 規則測試本身可以每個 describe 各自用不同 projectId、互不影響完全不同，
- * 純 Firestore 操作沒有這個限制，只有 Storage→Firestore 的跨服務讀取有）。
- * 兩邊不一致的話，Storage 規則會讀到一個沒有任何白名單資料的空專案，
- * 所有寫入都會被 fail closed 擋成 unauthorized，看起來像規則寫錯，
- * 其實是專案 ID 對不上。
+ * Firestore 模擬器仍然一併啟動——一來 test:rules 這個 npm script本來就會
+ * 同時起 firestore／storage 兩個模擬器（其他測試檔案要用），二來這裡
+ * 還留了一個測試專門證明「settings/permissions 的覆寫矩陣不會影響
+ * Storage 端判斷」這個刻意接受的已知取捨，需要能寫一份 Firestore 文件
+ * 來對照。
  */
 const PROJECT_ID = 'ts-press-rules-ci'
 const FIRESTORE_HOST = '127.0.0.1'
@@ -48,7 +46,7 @@ const FIRESTORE_PORT = 8080
 const STORAGE_HOST = '127.0.0.1'
 const STORAGE_PORT = 9199
 
-describe('storage.rules（即時套用 Firestore 的 editPress／admin 權限）', () => {
+describe('storage.rules（改用 custom claims：pressCenter／role，不再跨服務讀 Firestore）', () => {
   let env: RulesTestEnvironment
 
   const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
@@ -72,54 +70,33 @@ describe('storage.rules（即時套用 Firestore 的 editPress／admin 權限）
 
   afterAll(async () => env?.cleanup())
 
-  // 每個案例都從乾淨的白名單開始
-  beforeEach(async () => {
-    await env.clearFirestore()
-    await env.withSecurityRulesDisabled(async (ctx) => {
-      const db = ctx.firestore()
-      await setDoc(doc(db, 'users', 'admin@x.com'), {
-        email: 'admin@x.com',
-        role: 'admin',
-        active: true,
-      })
-      await setDoc(doc(db, 'users', 'spec@x.com'), {
-        email: 'spec@x.com',
-        role: 'specialist',
-        active: true,
-      })
-      await setDoc(doc(db, 'users', 'inactive@x.com'), {
-        email: 'inactive@x.com',
-        role: 'specialist',
-        active: false,
-      })
-      await setDoc(doc(db, 'users', 'badtype@x.com'), {
-        // role 型別錯誤，模擬資料損毀
-        email: 'badtype@x.com',
-        role: 123,
-        active: true,
-      })
-    })
-  })
-
-  function storageAs(email: string, verified = true): FirebaseStorage {
+  /** claims 直接對應使用者目前的 ID token 內容，不再需要 Firestore 白名單文件。 */
+  function storageAsClaims(
+    email: string,
+    claims: {
+      email_verified?: boolean
+      pressCenter?: boolean
+      role?: unknown
+    } = {},
+  ): FirebaseStorage {
     return env
-      .authenticatedContext(email, { email, email_verified: verified })
-      .storage()
-  }
-  const outsiderStorage = () =>
-    env
-      .authenticatedContext('nobody-uid', {
-        email: 'nobody@x.com',
-        email_verified: true,
+      .authenticatedContext(email, {
+        email,
+        email_verified: claims.email_verified ?? true,
+        ...(claims.pressCenter !== undefined ? { pressCenter: claims.pressCenter } : {}),
+        ...(claims.role !== undefined ? { role: claims.role } : {}),
       })
       .storage()
-  const anonStorage = () => env.unauthenticatedContext().storage()
-
-  async function setOverrides(roles: Record<string, unknown>) {
-    await env.withSecurityRulesDisabled(async (ctx) => {
-      await setDoc(doc(ctx.firestore(), 'settings', 'permissions'), { roles })
-    })
   }
+
+  const storageAsAdmin = () =>
+    storageAsClaims('admin@x.com', { pressCenter: true, role: 'admin' })
+  const storageAsSpecialist = () =>
+    storageAsClaims('spec@x.com', { pressCenter: true, role: 'specialist' })
+  const storageAsManager = () =>
+    storageAsClaims('manager@x.com', { pressCenter: true, role: 'manager' })
+
+  const anonStorage = () => env.unauthenticatedContext().storage()
 
   async function seedFileBypassingRules(path: string) {
     await env.withSecurityRulesDisabled(async (ctx) => {
@@ -127,83 +104,123 @@ describe('storage.rules（即時套用 Firestore 的 editPress／admin 權限）
     })
   }
 
-  describe('新聞稿附件與 hero 圖片（依即時 editPress 權限）', () => {
+  describe('新聞稿附件與 hero 圖片（依 pressCenter／role claims 判斷）', () => {
     const attachPath = 'press/p1/attachments/a.png'
     const heroPath = 'press/p1/hero/a.png'
 
-    it('admin（預設 editPress=true）可以上傳、覆寫、刪除', async () => {
-      await assertSucceeds(uploadBytes(ref(storageAs('admin@x.com'), attachPath), png, meta))
-      await assertSucceeds(uploadBytes(ref(storageAs('admin@x.com'), attachPath), png, meta)) // 覆寫
-      await assertSucceeds(deleteObject(ref(storageAs('admin@x.com'), attachPath)))
+    it('admin（pressCenter=true, role=admin）可以上傳、覆寫、刪除附件', async () => {
+      await assertSucceeds(uploadBytes(ref(storageAsAdmin(), attachPath), png, meta))
+      await assertSucceeds(uploadBytes(ref(storageAsAdmin(), attachPath), png, meta)) // 覆寫
+      await assertSucceeds(deleteObject(ref(storageAsAdmin(), attachPath)))
     })
 
-    it('specialist（預設 editPress=true）可以上傳、覆寫、刪除 hero 圖片', async () => {
-      await assertSucceeds(uploadBytes(ref(storageAs('spec@x.com'), heroPath), png, meta))
-      await assertSucceeds(uploadBytes(ref(storageAs('spec@x.com'), heroPath), png, meta))
-      await assertSucceeds(deleteObject(ref(storageAs('spec@x.com'), heroPath)))
+    it('specialist（pressCenter=true, role=specialist）可以上傳、覆寫、刪除 hero 圖片', async () => {
+      await assertSucceeds(uploadBytes(ref(storageAsSpecialist(), heroPath), png, meta))
+      await assertSucceeds(uploadBytes(ref(storageAsSpecialist(), heroPath), png, meta))
+      await assertSucceeds(deleteObject(ref(storageAsSpecialist(), heroPath)))
     })
 
-    it('editPress=false 時，即使帳號仍在白名單，上傳／覆寫／刪除全部拒絕', async () => {
-      await setOverrides({ specialist: { editPress: false } })
-      await assertFails(uploadBytes(ref(storageAs('spec@x.com'), attachPath), png, meta))
-      await seedFileBypassingRules(attachPath)
-      await assertFails(uploadBytes(ref(storageAs('spec@x.com'), attachPath), png, meta)) // 覆寫
-      await assertFails(deleteObject(ref(storageAs('spec@x.com'), attachPath)))
+    it('manager（pressCenter=true, role=manager）可以上傳 hero 圖片', async () => {
+      await assertSucceeds(uploadBytes(ref(storageAsManager(), heroPath), png, meta))
     })
 
-    it('權限撤銷後立即拒絕，不必等重新登入或 token 刷新', async () => {
-      // 一開始有權限
-      await assertSucceeds(uploadBytes(ref(storageAs('spec@x.com'), attachPath), png, meta))
-      // 管理員即時撤銷（同一個 authenticatedContext，模擬同一個舊 token 繼續用）
-      await setOverrides({ specialist: { editPress: false } })
-      await assertFails(uploadBytes(ref(storageAs('spec@x.com'), attachPath), png, meta))
-    })
-
-    it('有 editPress 仍要符合檔案型別／大小限制', async () => {
+    it('pressCenter 不是 true（缺失／false／型別錯誤）一律拒絕，即使 role 是合法角色', async () => {
       await assertFails(
-        uploadBytes(ref(storageAs('admin@x.com'), attachPath), png, {
+        uploadBytes(ref(storageAsClaims('nopc@x.com', { role: 'admin' }), attachPath), png, meta),
+      )
+      await assertFails(
+        uploadBytes(
+          ref(storageAsClaims('falsepc@x.com', { pressCenter: false, role: 'admin' }), attachPath),
+          png,
+          meta,
+        ),
+      )
+    })
+
+    it('role claim 缺失或不是三個已知角色之一，fail closed 拒絕，即使 pressCenter=true', async () => {
+      await assertFails(
+        uploadBytes(
+          ref(storageAsClaims('norole@x.com', { pressCenter: true }), attachPath),
+          png,
+          meta,
+        ),
+      )
+      await assertFails(
+        uploadBytes(
+          ref(
+            storageAsClaims('badrole@x.com', { pressCenter: true, role: 'superuser' }),
+            attachPath,
+          ),
+          png,
+          meta,
+        ),
+      )
+    })
+
+    it('舊代號 editor 視為 specialist，仍可上傳', async () => {
+      await assertSucceeds(
+        uploadBytes(
+          ref(storageAsClaims('legacy@x.com', { pressCenter: true, role: 'editor' }), heroPath),
+          png,
+          meta,
+        ),
+      )
+    })
+
+    it('settings/permissions 的角色權限覆寫矩陣不影響 Storage 端判斷（已知取捨，claims 只帶 role，不帶覆寫後矩陣）', async () => {
+      // 即使 Firestore 明確把 specialist 的 editPress 關掉，Storage 端
+      // 完全不會讀到這份文件——見 storage.rules 開頭的【已知取捨】第 2 點。
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), 'settings', 'permissions'), {
+          roles: { specialist: { editPress: false } },
+        })
+      })
+      await assertSucceeds(uploadBytes(ref(storageAsSpecialist(), attachPath), png, meta))
+    })
+
+    it('有 pressCenter／role 仍要符合檔案型別／大小限制', async () => {
+      await assertFails(
+        uploadBytes(ref(storageAsAdmin(), attachPath), png, {
           contentType: 'application/x-msdownload',
         }),
       )
       const big = new Uint8Array(11 * 1024 * 1024)
-      await assertFails(uploadBytes(ref(storageAs('admin@x.com'), attachPath), big, meta))
+      await assertFails(uploadBytes(ref(storageAsAdmin(), attachPath), big, meta))
     })
 
     it('無登入一律拒絕', async () => {
       await assertFails(uploadBytes(ref(anonStorage(), attachPath), png, meta))
     })
 
-    it('信箱未驗證一律拒絕', async () => {
+    it('信箱未驗證一律拒絕，即使 pressCenter=true', async () => {
       await assertFails(
-        uploadBytes(ref(storageAs('spec@x.com', false), attachPath), png, meta),
+        uploadBytes(
+          ref(
+            storageAsClaims('unverified@x.com', {
+              email_verified: false,
+              pressCenter: true,
+              role: 'specialist',
+            }),
+            attachPath,
+          ),
+          png,
+          meta,
+        ),
       )
     })
 
-    it('不在白名單（沒有 users 文件）一律拒絕', async () => {
-      await assertFails(uploadBytes(ref(outsiderStorage(), attachPath), png, meta))
-    })
-
-    it('帳號 inactive 一律拒絕', async () => {
-      await assertFails(uploadBytes(ref(storageAs('inactive@x.com'), attachPath), png, meta))
-    })
-
-    it('role 欄位型別錯誤一律拒絕（fail closed）', async () => {
-      await assertFails(uploadBytes(ref(storageAs('badtype@x.com'), attachPath), png, meta))
-    })
-
-    it('settings/permissions 格式被竄改成畸形時，連 admin 的預設權限都不給（fail closed）', async () => {
-      await env.withSecurityRulesDisabled(async (ctx) => {
-        await setDoc(doc(ctx.firestore(), 'settings', 'permissions'), {
-          roles: 'everything',
-        })
-      })
-      await assertFails(uploadBytes(ref(storageAs('admin@x.com'), attachPath), png, meta))
-    })
-
-    it('讀取只要在白名單即可，不需要 editPress', async () => {
-      await setOverrides({ specialist: { editPress: false } })
+    it('讀取只要 pressCenter=true 即可，不需要 role 具備 editPress（甚至不需要合法 role）', async () => {
       await seedFileBypassingRules(attachPath)
-      await assertSucceeds(getMetadata(ref(storageAs('spec@x.com'), attachPath)))
+      await assertSucceeds(
+        getMetadata(ref(storageAsClaims('readonly@x.com', { pressCenter: true }), attachPath)),
+      )
+    })
+
+    it('讀取沒有 pressCenter 仍然拒絕', async () => {
+      await seedFileBypassingRules(attachPath)
+      await assertFails(
+        getMetadata(ref(storageAsClaims('nopc2@x.com', {}), attachPath)),
+      )
     })
   })
 
@@ -211,22 +228,22 @@ describe('storage.rules（即時套用 Firestore 的 editPress／admin 權限）
     const path = 'branding/logo.png'
 
     it('admin 可以建立與刪除', async () => {
-      await assertSucceeds(uploadBytes(ref(storageAs('admin@x.com'), path), png, meta))
-      await assertSucceeds(deleteObject(ref(storageAs('admin@x.com'), path)))
+      await assertSucceeds(uploadBytes(ref(storageAsAdmin(), path), png, meta))
+      await assertSucceeds(deleteObject(ref(storageAsAdmin(), path)))
     })
 
-    it('specialist 不能建立，即使 editPress=true', async () => {
-      await assertFails(uploadBytes(ref(storageAs('spec@x.com'), path), png, meta))
+    it('specialist 不能建立，即使 pressCenter=true', async () => {
+      await assertFails(uploadBytes(ref(storageAsSpecialist(), path), png, meta))
     })
 
     it('specialist 不能刪除', async () => {
       await seedFileBypassingRules(path)
-      await assertFails(deleteObject(ref(storageAs('spec@x.com'), path)))
+      await assertFails(deleteObject(ref(storageAsSpecialist(), path)))
     })
 
     it('specialist 仍可讀取（介面要顯示 logo）', async () => {
       await seedFileBypassingRules(path)
-      await assertSucceeds(getMetadata(ref(storageAs('spec@x.com'), path)))
+      await assertSucceeds(getMetadata(ref(storageAsSpecialist(), path)))
     })
 
     it('未登入不能建立', async () => {
@@ -236,9 +253,7 @@ describe('storage.rules（即時套用 Firestore 的 editPress／admin 權限）
 
   describe('未定義的路徑', () => {
     it('一律拒絕', async () => {
-      await assertFails(
-        uploadBytes(ref(storageAs('admin@x.com'), 'random/other.png'), png, meta),
-      )
+      await assertFails(uploadBytes(ref(storageAsAdmin(), 'random/other.png'), png, meta))
     })
   })
 })

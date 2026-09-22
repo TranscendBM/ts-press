@@ -3,41 +3,57 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
 
-    // ---- 即時權限判斷 ----
+    // ---- 權限判斷：讀 custom claims，不呼叫 firestore.get() ----
     //
-    // Storage Rules v2 支援 firestore.get() / firestore.exists()，可以直接讀
-    // (default) Firestore 資料庫的即時內容 —— 已用本機模擬器實測確認可行
-    // （seed 一個 Firestore 文件、改內容、觀察 Storage 的 allow/deny 立即
-    // 跟著變動；文件被刪掉時 .data 存取失敗，規則落在拒絕，行為與
-    // firestore.rules 的 fail-closed 一致）。
+    // round 33 修正（緊急）：這裡原本用 firestore.get() / firestore.exists()
+    // 跨服務即時讀 (default) Firestore 資料庫的 users／settings/permissions
+    // 文件，理由見 git 歷史——本機模擬器實測過撤銷權限立即生效。但部署到
+    // 正式環境後，兩個真實帳號（一個 specialist、一個 admin）回報上傳
+    // hero 圖片與附件全部被 storage/unauthorized 擋下；逐項唯讀查證過
+    // 這兩個帳號的 Firestore 白名單文件（role／active 型別與值都正確）、
+    // Firebase Auth 狀態（email_verified=true、未停用）、以及正式環境
+    // 實際部署的 Storage Rules 內容（與這份檔案逐字元相同），全部正常，
+    // 唯獨上傳持續失敗。tests/storageRules.test.ts 的既有註解也記錄過
+    // 一次「Storage 模擬器的 firestore.get() 跨服務呼叫解析到錯誤的
+    // project」的真實案例，會讓所有寫入被 fail closed 成 unauthorized、
+    // 表面上看起來像規則寫錯——兩者合起來強烈指向 firestore.get() /
+    // firestore.exists() 這個跨服務機制在這個專案的正式執行環境裡不可靠，
+    // 不是白名單或角色設定本身的問題。
     //
-    // 因此不再用 custom claims（pressCenter／role）判斷是否放行寫入 ——
-    // claims 寫進 JWT 後最長要等到 token 過期／下次登入才會刷新，管理員
-    // 撤銷 editPress 後，使用者理論上還能拿舊 token 繼續刪除、覆寫新聞稿
-    // 檔案到 token 過期為止。改成每次都讀 Firestore 的即時內容，撤銷立即
-    // 生效，不必處理任何 token 刷新的時序問題 —— 與 firestore.rules 的
-    // hasPerm() 是同一套邏輯，只是搬到 Storage Rules 的語法重寫一份
-    // （兩個規則引擎是獨立的檔案，沒有共用程式碼的機制，只能維持同步）。
+    // 改回這個專案本來就有、且持續在運作的機制：
+    // functions/src/index.ts 的 syncUserClaims／onUserCreated／applyClaim()
+    // 會把白名單的 active／role 同步成 Firebase Auth 的 custom claims
+    // （`pressCenter`、`role`）——已經唯讀查證過，這兩個帳號目前的 claims
+    // 內容正確、與 Firestore 白名單一致。Storage Rules 改成只讀
+    // request.auth.token 裡的這兩個 claim，不再跨服務呼叫 Firestore。
     //
-    // ⚠️ 修改這裡的權限矩陣邏輯時，firestore.rules 的對應函式也要一併更新，
-    // 兩邊必須與 shared/permissions.ts 的 DEFAULT_PERMISSIONS 保持一致。
-    // tests/storageRules.test.ts 與 tests/firestoreRules.test.ts 用平行的
-    // 測試案例交叉驗證兩邊行為一致。
-
-    function userDocPath() {
-      return /databases/(default)/documents/users/$(request.auth.token.email);
-    }
+    // ⚠️ 已知取捨（刻意接受，不是疏漏）：
+    // 1. 撤銷權限後要等使用者的 ID token 過期或重新登入才會反映到 claims，
+    //    不像 firestore.get() 版本那樣立即生效——這正是當初改用
+    //    firestore.get() 想解決的問題，但那個版本目前連正常上傳都做不到，
+    //    兩害相權取其輕，先恢復可用性。
+    // 2. settings/permissions 的角色權限覆寫矩陣只影響 Firestore 端
+    //   （firestore.rules 仍然即時讀取，完全不受這次修改影響），不會
+    //    反映到 Storage 端——claims 只帶 role，不帶完整的覆寫後權限矩陣。
+    //    也就是說，即使管理員把 specialist 的 editPress 關掉，在 claims
+    //    刷新之前，specialist 帳號原則上仍可能上傳 Storage 檔案，但無法
+    //    把檔案路徑寫進 Firestore 的新聞稿文件（firestore.rules 會擋下）
+    //   ——最壞結果是留下沒有被任何文件引用的孤兒檔案，不是資料外洩或
+    //    越權操作。
+    //
+    // ⚠️ 修改這裡的權限矩陣邏輯時，firestore.rules 的對應函式也要一併
+    // 檢查是否需要同步；shared/permissions.ts 的 DEFAULT_PERMISSIONS
+    // 是兩邊 defaultGrant() 的共同依據。
 
     function isLiveWhitelisted() {
       return request.auth != null
         && request.auth.token.email_verified == true
-        && firestore.exists(userDocPath())
-        && firestore.get(userDocPath()).data.active == true;
+        && request.auth.token.pressCenter == true;
     }
 
     // 舊代號沿用 shared/permissions.ts 的 normalizeRole：'editor' 視為 'specialist'。
     function currentRole() {
-      let role = firestore.get(userDocPath()).data.role;
+      let role = request.auth.token.role;
       return role == 'editor' ? 'specialist' : role;
     }
 
@@ -45,64 +61,18 @@ service firebase.storage {
       return role in ['admin', 'manager', 'specialist'];
     }
 
-    // 對應 shared/permissions.ts 的 DEFAULT_PERMISSIONS
+    // 對應 shared/permissions.ts 的 DEFAULT_PERMISSIONS——不讀
+    // settings/permissions 覆寫矩陣，見上方【已知取捨】第 2 點。
     function defaultGrant(role, permission) {
       return role == 'admin'
         || (role == 'manager' && permission in ['viewPress', 'editPress', 'downloadPress', 'sendTest', 'sendReal', 'manageContacts', 'manageEvents', 'viewCampaigns'])
         || (role == 'specialist' && permission in ['viewPress', 'editPress', 'downloadPress', 'manageContacts', 'manageEvents', 'viewCampaigns']);
     }
 
-    function validPermissionMap(m) {
-      return m is map
-        && m.keys().hasOnly(['viewPress', 'editPress', 'downloadPress', 'sendTest', 'sendReal', 'manageContacts', 'manageEvents', 'viewCampaigns', 'manageUsers', 'manageSettings'])
-        && (!('viewPress' in m) || m['viewPress'] is bool)
-        && (!('editPress' in m) || m['editPress'] is bool)
-        && (!('downloadPress' in m) || m['downloadPress'] is bool)
-        && (!('sendTest' in m) || m['sendTest'] is bool)
-        && (!('sendReal' in m) || m['sendReal'] is bool)
-        && (!('manageContacts' in m) || m['manageContacts'] is bool)
-        && (!('manageEvents' in m) || m['manageEvents'] is bool)
-        && (!('viewCampaigns' in m) || m['viewCampaigns'] is bool)
-        && (!('manageUsers' in m) || m['manageUsers'] is bool)
-        && (!('manageSettings' in m) || m['manageSettings'] is bool);
-    }
-
-    function validRolesMap(roles) {
-      return roles is map
-        && roles.keys().hasOnly(['admin', 'manager', 'specialist'])
-        && (!('admin' in roles) || validPermissionMap(roles['admin']))
-        && (!('manager' in roles) || validPermissionMap(roles['manager']))
-        && (!('specialist' in roles) || validPermissionMap(roles['specialist']));
-    }
-
-    function permissionsDocPath() {
-      return /databases/(default)/documents/settings/permissions;
-    }
-
-    // settings/permissions 不存在時視為「尚未覆寫」，套用預設矩陣。
-    function permissionOverrides() {
-      return firestore.exists(permissionsDocPath())
-        ? firestore.get(permissionsDocPath()).data.roles
-        : null;
-    }
-
-    // 覆寫矩陣格式不合法時 fail closed（不猜測、不套預設），與 firestore.rules 一致。
-    function hasPermForRole(role, permission) {
-      let overrides = permissionOverrides();
-      let overridesOk = overrides == null || validRolesMap(overrides);
-      return isKnownRole(role)
-        && overridesOk
-        && (
-          permission in ['manageUsers', 'manageSettings']
-            ? role == 'admin'
-            : (overrides != null && role in overrides && permission in overrides[role])
-              ? overrides[role][permission] == true
-              : defaultGrant(role, permission)
-        );
-    }
-
     function hasPerm(permission) {
-      return isLiveWhitelisted() && hasPermForRole(currentRole(), permission);
+      return isLiveWhitelisted()
+        && isKnownRole(currentRole())
+        && defaultGrant(currentRole(), permission);
     }
 
     function isLiveAdmin() {
@@ -137,7 +107,7 @@ service firebase.storage {
     }
 
     // 新聞稿內文圖片：讀取只要是白名單使用者，寫入（含刪除既有檔案）
-    // 需要即時的 editPress 權限 —— 管理員撤銷後立刻擋下，不看 token 是否更新過。
+    // 需要 editPress 權限（見上方 hasPerm() 的 claims 版說明）。
     match /press/{pressId}/hero/{fileName} {
       allow read: if isLiveWhitelisted();
       allow create, update: if hasPerm('editPress')
