@@ -385,8 +385,8 @@ export function renderEmailHtml(input: TemplateInput): string {
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
        style="background-color:#f4f5f7;padding:24px 12px;">
   <tr><td align="center">
-    <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0"
-           style="width:600px;max-width:100%;background-color:#ffffff;border-radius:8px;overflow:hidden;">
+    <table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0"
+           style="width:640px;max-width:100%;background-color:#ffffff;border-radius:8px;overflow:hidden;">
 
       <!-- 頁首 -->
       <tr><td style="background-color:${BRAND_COLOR};padding:18px 32px;">
