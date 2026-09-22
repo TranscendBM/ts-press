@@ -4,6 +4,7 @@ import {
   escapeHtml,
   subjectSingleLine,
   subjectMultiline,
+  renderBlocks,
   renderBodyHtml,
   renderEmailHtml,
   renderEmailText,
@@ -260,6 +261,79 @@ describe('splitMarkdownBlocks（round 30 新增：## 標題後不需要空白行
   })
 })
 
+describe('splitMarkdownBlocks（round 34 新增：pipe table 語法）', () => {
+  it('基本表格：表頭列＋分隔列＋兩列資料', () => {
+    expect(
+      splitMarkdownBlocks('| 項目 | Q1 | Q2 |\n| --- | --- | --- |\n| 營收 | 100 | 120 |'),
+    ).toEqual([
+      {
+        type: 'table',
+        rows: [
+          ['項目', 'Q1', 'Q2'],
+          ['營收', '100', '120'],
+        ],
+      },
+    ])
+  })
+
+  it('表格前後有空白行時，各自獨立成段', () => {
+    expect(
+      splitMarkdownBlocks(
+        '前言段落\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n後續段落',
+      ),
+    ).toEqual([
+      { type: 'paragraph', text: '前言段落' },
+      { type: 'table', rows: [['a', 'b'], ['1', '2']] },
+      { type: 'paragraph', text: '後續段落' },
+    ])
+  })
+
+  it('表格緊接標題（沒有空白行）→ 各自獨立成段，呼應 ## 標題不需要空白行的既有規則', () => {
+    expect(
+      splitMarkdownBlocks('| a | b |\n| --- | --- |\n| 1 | 2 |\n## 標題\n內文'),
+    ).toEqual([
+      { type: 'table', rows: [['a', 'b'], ['1', '2']] },
+      { type: 'heading', text: '標題' },
+      { type: 'paragraph', text: '內文' },
+    ])
+  })
+
+  it('只有表頭列、下一行不是合法分隔列 → 不視為表格，整段當成一般段落', () => {
+    expect(splitMarkdownBlocks('| a | b |\n這不是分隔列')).toEqual([
+      { type: 'paragraph', text: '| a | b |\n這不是分隔列' },
+    ])
+  })
+
+  it('一般句子裡偶然出現的 | 不會被誤判成表格', () => {
+    expect(splitMarkdownBlocks('A|B 二選一')).toEqual([
+      { type: 'paragraph', text: 'A|B 二選一' },
+    ])
+  })
+
+  it('fence 內以 | 開頭的行不會觸發表格偵測，維持既有 fence 優先的規則', () => {
+    const input = '```\n| a | b |\n| --- | --- |\n```'
+    expect(splitMarkdownBlocks(input)).toEqual([{ type: 'paragraph', text: input }])
+  })
+
+  it('CRLF 換行的表格一樣能正確辨識', () => {
+    expect(
+      splitMarkdownBlocks('| a | b |\r\n| --- | --- |\r\n| 1 | 2 |'),
+    ).toEqual([{ type: 'table', rows: [['a', 'b'], ['1', '2']] }])
+  })
+
+  it('資料列數量可以少於或不同於表頭欄數，逐列原樣拆出，不強制補齊', () => {
+    expect(
+      splitMarkdownBlocks('| a | b | c |\n| --- | --- | --- |\n| 1 |'),
+    ).toEqual([{ type: 'table', rows: [['a', 'b', 'c'], ['1']] }])
+  })
+
+  it('表格資料列可以一路延伸到檔案結尾，沒有下一個空白行也能正確結束', () => {
+    expect(splitMarkdownBlocks('| a |\n| --- |\n| 1 |\n| 2 |')).toEqual([
+      { type: 'table', rows: [['a'], ['1'], ['2']] },
+    ])
+  })
+})
+
 describe('renderBlocks／renderBodyHtml／renderEmailHtml：## 標題不需要空白行的語意在下游輸出一致（round 30）', () => {
   it('renderBodyHtml（CMS HTML）：沒有空白行時標題與段落正確拆開', () => {
     expect(renderBodyHtml('## 標題\n下一段內文')).toBe('<h4>標題</h4>\n<p>下一段內文</p>')
@@ -309,6 +383,49 @@ describe('renderBodyHtml', () => {
 
   it('空內文回傳空字串', () => {
     expect(renderBodyHtml('')).toBe('')
+  })
+})
+
+describe('表格渲染（round 34 新增）', () => {
+  const tableBody = '| 項目 | Q1 |\n| --- | --- |\n| 營收 | 100 |'
+
+  it('renderBlocks（信件行內樣式）：表頭列用品牌色底、白字，資料列用髮絲線', () => {
+    const [html] = renderBlocks(tableBody, 'Arial')
+    expect(html).toContain('<table')
+    expect(html).toContain('<th')
+    expect(html).toContain('項目')
+    expect(html).toContain('background-color:#960014')
+    expect(html).toContain('border:1px solid #e6e8ec')
+    expect(html).toContain('營收')
+    expect(html).toContain('100')
+  })
+
+  it('renderBodyHtml（CMS HTML）：純 <table> 結構，不含行內樣式', () => {
+    const html = renderBodyHtml(tableBody)
+    expect(html).toBe('<table><tr><th>項目</th><th>Q1</th></tr><tr><td>營收</td><td>100</td></tr></table>')
+    expect(html).not.toContain('style=')
+  })
+
+  it('renderEmailHtml：完整信件 HTML 內含表格結構', () => {
+    const html = renderEmailHtml({ ...base, bodyText: tableBody })
+    expect(html).toContain('<table')
+    expect(html).toContain('項目')
+    expect(html).toContain('營收')
+  })
+
+  it('儲存格內容會被跳脫，防止 XSS', () => {
+    const xssBody = '| a |\n| --- |\n| <script>alert(1)</script> |'
+    expect(renderBodyHtml(xssBody)).not.toContain('<script>alert(1)</script>')
+    expect(renderBodyHtml(xssBody)).toContain('&lt;script&gt;')
+    const [html] = renderBlocks(xssBody, 'Arial')
+    expect(html).not.toContain('<script>alert(1)</script>')
+  })
+
+  it('renderEmailText（純文字信件備援）刻意維持 pipe table 語法原樣輸出，不轉換——語法本身在純文字信裡已經可讀，不需要額外處理', () => {
+    const text = renderEmailText({ ...base, bodyText: tableBody })
+    expect(text).toContain('| 項目 | Q1 |')
+    expect(text).toContain('| --- | --- |')
+    expect(text).toContain('| 營收 | 100 |')
   })
 })
 

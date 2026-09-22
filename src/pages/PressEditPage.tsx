@@ -14,6 +14,7 @@ import {
   Check,
   Code2,
   Copy,
+  Download,
   Eye,
   FileDown,
   FileType,
@@ -22,6 +23,7 @@ import {
   Save,
   Send,
   Trash2,
+  Upload,
 } from 'lucide-react'
 import { db } from '../lib/firebase'
 import PageHeader from '../components/PageHeader'
@@ -44,7 +46,8 @@ import {
   uploadPressFile,
 } from '../lib/storage'
 import { renderBodyHtml, renderEmailHtml } from '../../shared/emailTemplate'
-import { downloadPdf, downloadWord } from '../lib/exportDoc'
+import { downloadPdf, downloadWord, downloadWordTemplate } from '../lib/exportDoc'
+import { parseWordDocument, type ParsedWordDocument } from '../lib/wordImport'
 import { saveThenNavigate } from '../lib/saveThenNavigate'
 
 export default function PressEditPage() {
@@ -74,10 +77,20 @@ export default function PressEditPage() {
   const [copied, setCopied] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [downloading, setDownloading] = useState(false)
+  const [templateDownloading, setTemplateDownloading] = useState(false)
   const [error, setError] = useState('')
+
+  // round 34 新增：Word 匯入——選檔後先在這個 modal 裡預覽解析結果，
+  // 使用者確認後才真的覆蓋目前分頁的 subject/bodyText（見下方
+  // onWordImportPick／confirmWordImport）。
+  const [wordImportOpen, setWordImportOpen] = useState(false)
+  const [parsingImport, setParsingImport] = useState(false)
+  const [parsedImport, setParsedImport] = useState<ParsedWordDocument | null>(null)
+  const [importError, setImportError] = useState('')
 
   const heroInput = useRef<HTMLInputElement>(null)
   const attachInput = useRef<HTMLInputElement>(null)
+  const wordImportInput = useRef<HTMLInputElement>(null)
   // 預覽要跟實際寄出的信一致，所以 logo 與新聞聯絡人也要帶進來
   const [emailSettings, setEmailSettings] = useState<EmailSettings | null>(null)
   // 負責人下拉：列出所有白名單使用者
@@ -346,6 +359,40 @@ export default function PressEditPage() {
     }
   }
 
+  // round 34 新增：選好 .docx 後先純本機解析（不碰 Firestore/Storage），
+  // 解析結果放進 modal 讓使用者確認過再真的寫進目前分頁——見下方
+  // confirmWordImport()。解析失敗（例如選錯檔案格式）就地顯示錯誤，
+  // 不開 modal。
+  async function onWordImportPick(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    setParsingImport(true)
+    setImportError('')
+    try {
+      const buffer = await file.arrayBuffer()
+      const result = await parseWordDocument(buffer)
+      setParsedImport(result)
+      setWordImportOpen(true)
+    } catch (err) {
+      console.error('Word 匯入解析失敗', err)
+      setImportError(
+        `匯入失敗：無法解析這個檔案，請確認是 .docx 格式。（${(err as Error)?.message ?? '未知錯誤'}）`,
+      )
+    } finally {
+      setParsingImport(false)
+    }
+  }
+
+  // 匯入是覆蓋，不是附加——確認前已在 modal 裡明確提示過。
+  function confirmWordImport() {
+    if (!parsedImport) return
+    patchVersion('subject', parsedImport.subject)
+    patchVersion('bodyText', parsedImport.bodyText)
+    setWordImportOpen(false)
+    setParsedImport(null)
+  }
+
   if (loading) {
     return <p className="p-16 text-center text-sm text-slate-400">載入中…</p>
   }
@@ -445,6 +492,34 @@ export default function PressEditPage() {
               <Code2 className="size-4" />
               HTML
             </Button>
+            <Button
+              onClick={async () => {
+                setTemplateDownloading(true)
+                try {
+                  await downloadWordTemplate(lang)
+                } finally {
+                  setTemplateDownloading(false)
+                }
+              }}
+              disabled={templateDownloading}
+            >
+              <Download className="size-4" />
+              {templateDownloading ? '產生中…' : 'Word 範本'}
+            </Button>
+            <Button
+              onClick={() => wordImportInput.current?.click()}
+              disabled={parsingImport || usReadOnly}
+            >
+              <Upload className="size-4" />
+              {parsingImport ? '解析中…' : '匯入 Word'}
+            </Button>
+            <input
+              ref={wordImportInput}
+              type="file"
+              accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              hidden
+              onChange={onWordImportPick}
+            />
             <Button variant="primary" onClick={save} disabled={saving || !dirty}>
               <Save className="size-4" />
               {saving ? '儲存中…' : '儲存'}
@@ -471,6 +546,11 @@ export default function PressEditPage() {
         {error && (
           <div className="mb-5 rounded-lg bg-red-50 p-3 text-sm text-red-700">
             {error}
+          </div>
+        )}
+        {importError && (
+          <div className="mb-5 rounded-lg bg-red-50 p-3 text-sm text-red-700">
+            {importError}
           </div>
         )}
 
@@ -774,6 +854,61 @@ export default function PressEditPage() {
           onFocus={(e) => e.currentTarget.select()}
           className="h-[52vh] w-full resize-none rounded-lg border border-slate-200 bg-slate-50 p-3 font-mono text-xs leading-relaxed text-slate-800"
         />
+      </Modal>
+
+      <Modal
+        open={wordImportOpen}
+        wide
+        title={`匯入 Word — ${LANGUAGE_LABELS[lang]}`}
+        onClose={() => {
+          setWordImportOpen(false)
+          setParsedImport(null)
+        }}
+        footer={
+          <>
+            <Button
+              onClick={() => {
+                setWordImportOpen(false)
+                setParsedImport(null)
+              }}
+            >
+              取消
+            </Button>
+            <Button variant="primary" onClick={confirmWordImport} disabled={!parsedImport}>
+              確認匯入
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
+            匯入會直接覆蓋目前「{LANGUAGE_LABELS[lang]}」分頁已輸入的主旨與內文，確認前請先確認下方預覽正確。
+          </div>
+
+          {parsedImport && parsedImport.warnings.length > 0 && (
+            <div className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
+              {parsedImport.warnings.map((w, i) => (
+                <div key={i}>{w}</div>
+              ))}
+            </div>
+          )}
+
+          <div>
+            <p className="mb-1 text-xs font-medium text-slate-500">主旨</p>
+            <p className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800">
+              {parsedImport?.subject || '（未偵測到標題）'}
+            </p>
+          </div>
+
+          <div>
+            <p className="mb-1 text-xs font-medium text-slate-500">內文預覽</p>
+            <iframe
+              title="word-import-preview"
+              className="h-[40vh] w-full rounded-lg border border-slate-200 bg-white"
+              srcDoc={`<style>body{font-family:sans-serif;padding:12px;line-height:1.6;color:#1f2430}table{border-collapse:collapse}td,th{border:1px solid #e6e8ec;padding:4px 8px}</style>${renderBodyHtml(parsedImport?.bodyText ?? '')}`}
+            />
+          </div>
+        </div>
       </Modal>
     </>
   )
