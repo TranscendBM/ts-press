@@ -28,13 +28,13 @@ describe('normalizeRole', () => {
 })
 
 describe('預設權限', () => {
-  it('行銷專員完全不能發送，連測試信也不行', () => {
-    expect(hasPermission('specialist', 'sendTest')).toBe(false)
+  it('行銷專員可以寄測試信，但不能正式發送', () => {
+    expect(hasPermission('specialist', 'sendTest')).toBe(true)
     expect(hasPermission('specialist', 'sendReal')).toBe(false)
   })
 
   it('舊的 editor 帳號套用行銷專員的權限', () => {
-    expect(hasPermission('editor', 'sendTest')).toBe(false)
+    expect(hasPermission('editor', 'sendTest')).toBe(true)
     expect(hasPermission('editor', 'sendReal')).toBe(false)
     expect(hasPermission('editor', 'manageContacts')).toBe(true)
   })

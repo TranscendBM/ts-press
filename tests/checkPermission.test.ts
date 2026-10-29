@@ -86,15 +86,27 @@ describe('checkPermission — 文件不存在時使用預設值', () => {
     ).toBe(false)
     expect(
       (await checkPermission('specialist', 'sendTest', missing)).allowed,
-    ).toBe(false)
+    ).toBe(true)
   })
 
-  it('預設值本身是最小權限：行銷專員不能發送', async () => {
-    for (const p of ['sendTest', 'sendReal', 'manageUsers', 'manageSettings'] as const) {
+  it('預設值：行銷專員可以寄測試信，但不能正式發送、不能管理使用者與系統設定', async () => {
+    expect(
+      (await checkPermission('specialist', 'sendTest', missing)).allowed,
+    ).toBe(true)
+    for (const p of ['sendReal', 'manageUsers', 'manageSettings'] as const) {
       expect((await checkPermission('specialist', p, missing)).allowed, p).toBe(
         false,
       )
     }
+  })
+
+  it('後台可以把行銷專員的測試信權限關掉', async () => {
+    const d = await checkPermission(
+      'specialist',
+      'sendTest',
+      withRoles({ specialist: { sendTest: false } }),
+    )
+    expect(d).toEqual({ allowed: false, reason: 'denied' })
   })
 })
 
@@ -189,7 +201,7 @@ describe('checkPermission — 只有明確合法的 true 才允許', () => {
 
   it('舊的 editor 帳號套用行銷專員權限', async () => {
     expect((await checkPermission('editor', 'sendTest', missing)).allowed).toBe(
-      false,
+      true,
     )
     expect(
       (await checkPermission('editor', 'manageContacts', missing)).allowed,

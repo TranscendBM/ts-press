@@ -183,9 +183,11 @@ describe('六個受管制 callable 的維護模式攔截（真實 Firestore emul
         role: 'specialist',
         active: true,
       })
+      // 行銷專員預設可以寄測試信，所以這裡改用正式發送（mode:'real'）——
+      // 專員沒有 sendReal，權限檢查必須先於維護檢查擋下。
       const request = {
         auth: { token: { email: specialistEmail, email_verified: true } },
-        data,
+        data: { ...data, mode: 'real', targetLists: ['tw_pr'] },
       } as unknown as CallableRequest<any>
       await expect(sendCampaignHandler(request)).rejects.toMatchObject({ code: 'permission-denied' })
     })
@@ -264,8 +266,9 @@ describe('六個受管制 callable 的維護模式攔截（真實 Firestore emul
         })
 
         // 動態權限覆寫：specialist 角色在預設矩陣（shared/permissions.ts
-        // DEFAULT_PERMISSIONS）裡 sendTest／sendReal 都沒有——這裡只額外
-        // 開放 sendTest，刻意不開放 sendReal，用來具體證明「就算某個角色
+        // DEFAULT_PERMISSIONS）裡有 sendTest、沒有 sendReal——這裡仍然明確
+        // 寫入 sendTest 覆寫（不依賴預設值，預設值之後改了這份測試也不受
+        // 影響），刻意不開放 sendReal，用來具體證明「就算某個角色
         // 被後台設定成擁有 sendTest，也不能靠這個權限通過需要 sendReal 的
         // 正式發送，更不能靠這個權限救回一份 mode 畸形、原本應該 fail
         // closed 的 campaign」。
