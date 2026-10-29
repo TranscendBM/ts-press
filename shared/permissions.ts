@@ -18,7 +18,7 @@ export const ROLE_LABELS: Record<Role, string> = {
 export const ROLE_DESCRIPTIONS: Record<Role, string> = {
   admin: '系統管理者，可調整權限與寄信設定',
   manager: '可正式發送新聞稿',
-  specialist: '維護名單與稿件，不能發送',
+  specialist: '維護名單與稿件，可寄測試信，不能正式發送',
 }
 
 /** 已停用的角色代號對應到現行角色，既有資料不必改。 */
@@ -68,7 +68,8 @@ function build(granted: Permission[]): RolePermissions {
 
 /**
  * 預設權限。行銷專員可以開稿件、下載檔案、維護名單與媒體關係，
- * 但完全不能發送 —— 連測試信都不行。
+ * 也可以寄測試信（只寄給自己或測試名單，永遠不會寄給媒體），
+ * 但不能正式發送。
  */
 export const DEFAULT_PERMISSIONS: PermissionMatrix = {
   admin: build([...PERMISSIONS]),
@@ -86,6 +87,7 @@ export const DEFAULT_PERMISSIONS: PermissionMatrix = {
     'viewPress',
     'editPress',
     'downloadPress',
+    'sendTest',
     'manageContacts',
     'manageEvents',
     'viewCampaigns',

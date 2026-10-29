@@ -156,7 +156,7 @@ service cloud.firestore {
     function defaultGrant(role, permission) {
       return role == 'admin'
         || (role == 'manager' && permission in ['viewPress', 'editPress', 'downloadPress', 'sendTest', 'sendReal', 'manageContacts', 'manageEvents', 'viewCampaigns'])
-        || (role == 'specialist' && permission in ['viewPress', 'editPress', 'downloadPress', 'manageContacts', 'manageEvents', 'viewCampaigns']);
+        || (role == 'specialist' && permission in ['viewPress', 'editPress', 'downloadPress', 'sendTest', 'manageContacts', 'manageEvents', 'viewCampaigns']);
     }
 
     // settings/permissions 不存在時視為「尚未覆寫」，一律套用預設矩陣。
