@@ -9,9 +9,13 @@ import {
   ImageRun,
   Packer,
   Paragraph,
+  Table,
+  TableCell,
+  TableRow,
   Tab,
   TabStopType,
   TextRun,
+  WidthType,
 } from 'docx'
 import {
   BRAND_COLOR,
@@ -146,6 +150,59 @@ function bodyRuns(line: string): (TextRun | ExternalHyperlink)[] {
   )
 }
 
+/** round 34 新增：表格儲存格統一用這組髮絲線邊框，呼應信件/PDF 的 `#E6E8EC`。 */
+const TABLE_CELL_BORDER = { style: BorderStyle.SINGLE, size: 4, color: 'E6E8EC' }
+const TABLE_CELL_BORDERS = {
+  top: TABLE_CELL_BORDER,
+  bottom: TABLE_CELL_BORDER,
+  left: TABLE_CELL_BORDER,
+  right: TABLE_CELL_BORDER,
+}
+
+/**
+ * round 34 新增：把一個 table 區塊（見 shared/emailTemplate.ts 的
+ * splitMarkdownBlocks()）轉成 docx 的 Table——第一列固定當表頭（品牌色
+ * 底、白字），呼應信件/PDF 的表格樣式，欄寬平均分配。
+ */
+function renderTableDocx(rows: string[][]): Table {
+  const [header, ...body] = rows
+  const columnCount = header?.length ?? 1
+  const columnWidth = Math.floor(100 / Math.max(columnCount, 1))
+
+  function cell(text: string, isHeader: boolean): TableCell {
+    return new TableCell({
+      children: [
+        new Paragraph({
+          children: [
+            new TextRun({
+              text,
+              size: SIZE_HEADER_LABEL,
+              font: FONTS,
+              bold: isHeader,
+              color: isHeader ? 'FFFFFF' : '2B2F36',
+            }),
+          ],
+        }),
+      ],
+      shading: isHeader ? { fill: BRAND_HEX } : undefined,
+      borders: TABLE_CELL_BORDERS,
+      width: { size: columnWidth, type: WidthType.PERCENTAGE },
+    })
+  }
+
+  const headerRow = new TableRow({
+    children: (header ?? []).map((text) => cell(text, true)),
+  })
+  const bodyRows = body.map(
+    (row) => new TableRow({ children: row.map((text) => cell(text, false)) }),
+  )
+
+  return new Table({
+    rows: [headerRow, ...bodyRows],
+    width: { size: 100, type: WidthType.PERCENTAGE },
+  })
+}
+
 function textParagraph(text: string, opts: { spacing?: number } = {}) {
   // 段落內的單行斷行（使用者按 Enter 但沒空行）也要保留 ——
   // 網頁與 PDF 是把 \n 轉成 <br>，Word 則用一個空的 break TextRun 換行，
@@ -163,7 +220,7 @@ function textParagraph(text: string, opts: { spacing?: number } = {}) {
 }
 
 export async function downloadWord(input: TemplateInput, filename: string) {
-  const children: Paragraph[] = []
+  const children: (Paragraph | Table)[] = []
 
   // 標題。主旨可含手動斷行（使用者在輸入框按 Enter），每段一個 TextRun，
   // 第二段起用 break 換行，讓 Word 呈現多行標題。
@@ -230,6 +287,11 @@ export async function downloadWord(input: TemplateInput, filename: string) {
           ],
         }),
       )
+    } else if (block.type === 'table') {
+      children.push(renderTableDocx(block.rows))
+      // Word 表格後面沒有段落間距的概念，補一個空段落，避免表格跟下一個
+      // 區塊黏在一起。
+      children.push(new Paragraph({ spacing: { after: 160 }, children: [] }))
     } else {
       children.push(textParagraph(block.text))
     }
@@ -429,6 +491,152 @@ export async function downloadWord(input: TemplateInput, filename: string) {
 }
 
 /**
+ * round 34 新增：下載一份「匯入用」Word 範本，示範標題／小標題／表格要
+ * 怎麼打才能被 src/lib/wordImport.ts 的 parseWordDocument() 正確辨識。
+ *
+ * 刻意不重用 downloadWord() 的內文小標題樣式——那裡只是手動加粗上色的一
+ * 般段落，不是 Word 真正的段落樣式，mammoth 只能可靠辨識段落樣式（標題
+ * 1／標題 2），辨識不了「剛好是粗體＋某個顏色」這種純視覺特徵。這裡改用
+ * 真正的 HeadingLevel.HEADING_1／HEADING_2，讓範本的段落樣式跟匯入端的
+ * 辨識規則對得上。
+ */
+export async function downloadWordTemplate(language: TemplateInput['language']) {
+  const isTw = language === 'tw'
+
+  const instructions = isTw
+    ? [
+        '這是「匯入 Word」功能的格式範本，請直接在這份文件裡修改內容，存檔後用編輯頁的「匯入 Word」按鈕上傳。',
+        '規則：文件裡第一個「標題 1」或「標題 2」樣式的段落會變成新聞稿標題，之後的「標題 1」或「標題 2」樣式段落都會變成內文小標題。',
+        '一般段落請用 Word 的「內文」樣式，不要套用任何標題樣式。',
+        '表格請用 Word 的「插入 > 表格」建立，匯入時會自動轉換成內文裡的表格；請勿合併儲存格。',
+        '目前不支援匯入圖片，請先匯入文字，再用編輯頁的「上傳圖片」補上首圖。',
+      ]
+    : [
+        'This is the format template for the "Import Word" feature. Edit this document directly, save it, then upload it with the "Import Word" button on the edit page.',
+        'Rule: the first paragraph styled "Heading 1" or "Heading 2" becomes the press release title; any later "Heading 1" or "Heading 2" paragraph becomes a sub-heading in the body.',
+        'Use the "Normal" style for regular paragraphs — do not apply any heading style.',
+        'Build tables with Word\'s Insert > Table; they will be converted automatically. Do not merge cells.',
+        'Images are not supported yet — import the text first, then add a hero image separately on the edit page.',
+      ]
+
+  const children: (Paragraph | Table)[] = []
+
+  for (const line of instructions) {
+    children.push(
+      new Paragraph({
+        spacing: { after: 120 },
+        children: [
+          new TextRun({ text: line, size: 18, italics: true, color: '8A919E', font: FONTS }),
+        ],
+      }),
+    )
+  }
+
+  children.push(
+    new Paragraph({
+      spacing: { before: 200, after: 320 },
+      border: { top: { style: BorderStyle.SINGLE, size: 6, color: 'E6E8EC' } },
+      children: [],
+    }),
+  )
+
+  children.push(
+    new Paragraph({
+      heading: HeadingLevel.HEADING_1,
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 240 },
+      children: [
+        new TextRun({
+          text: isTw ? '＜在這裡輸入新聞稿標題＞' : '<Enter the press release title here>',
+          bold: true,
+          size: SIZE_TITLE,
+          font: FONTS,
+          color: '12161C',
+        }),
+      ],
+    }),
+  )
+
+  children.push(
+    textParagraph(
+      isTw
+        ? '這是一般段落，直接打字即可，不需要套用任何標題樣式。段落之間請按 Enter 空一行分隔。'
+        : 'This is a regular paragraph — just type normally, no heading style needed. Leave a blank line between paragraphs.',
+    ),
+  )
+
+  children.push(
+    new Paragraph({
+      heading: HeadingLevel.HEADING_2,
+      spacing: { before: 240, after: 160 },
+      children: [
+        new TextRun({
+          text: isTw ? '＜小標題範例＞' : '<Sub-heading example>',
+          bold: true,
+          size: 26,
+          color: BRAND_HEX,
+          font: FONTS,
+        }),
+      ],
+    }),
+  )
+
+  children.push(
+    textParagraph(
+      isTw
+        ? '小標題底下接一般段落，一樣不需要套用標題樣式。'
+        : 'A sub-heading is followed by regular paragraphs, again without any heading style.',
+    ),
+  )
+
+  children.push(
+    new Paragraph({
+      heading: HeadingLevel.HEADING_2,
+      spacing: { before: 240, after: 160 },
+      children: [
+        new TextRun({
+          text: isTw ? '＜表格範例＞' : '<Table example>',
+          bold: true,
+          size: 26,
+          color: BRAND_HEX,
+          font: FONTS,
+        }),
+      ],
+    }),
+  )
+
+  children.push(
+    renderTableDocx([
+      isTw ? ['項目', 'Q1', 'Q2'] : ['Item', 'Q1', 'Q2'],
+      isTw ? ['營收（百萬元）', '100', '120'] : ['Revenue (M)', '100', '120'],
+      isTw ? ['年增率', '5%', '8%'] : ['YoY growth', '5%', '8%'],
+    ]),
+  )
+  children.push(new Paragraph({ spacing: { after: 160 }, children: [] }))
+
+  const doc = new Document({
+    creator: 'Transcend Press Center',
+    title: isTw ? '新聞稿匯入範本' : 'Press release import template',
+    sections: [
+      {
+        properties: {
+          page: {
+            size: { width: PAGE_WIDTH, height: PAGE_HEIGHT },
+            margin: { top: 1200, bottom: 1200, left: MARGIN_X, right: MARGIN_X },
+          },
+        },
+        children,
+      },
+    ],
+  })
+
+  saveBlob(
+    await Packer.toBlob(doc),
+    isTw ? '新聞稿匯入範本.docx' : 'press-release-import-template.docx',
+  )
+}
+
+/**
  * 把純文字轉成 HTML，並把網址包成明確的 <a>。
  *
  * 一定要自己輸出 <a>：若留純文字，Chrome 列印成 PDF 時會「自動偵測網址並加連結」，
@@ -444,6 +652,16 @@ function linkifyHtml(text: string): string {
       return href ? `<a href="${href}">${safe}</a>` : safe
     })
     .join('')
+}
+
+/** round 34 新增：把一個 table 區塊轉成 PDF 用的 `<table>` HTML，樣式跟 `<style>` 裡的 table/th/td 規則搭配。 */
+function renderTableHtmlForPdf(rows: string[][]): string {
+  const [header, ...body] = rows
+  const headerRow = `<tr>${(header ?? []).map((cell) => `<th>${escapeHtml(cell)}</th>`).join('')}</tr>`
+  const bodyRows = body
+    .map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`)
+    .join('')
+  return `<table>${headerRow}${bodyRows}</table>`
 }
 
 /**
@@ -463,13 +681,13 @@ export function downloadPdf(input: TemplateInput, filename: string) {
       ? "'Helvetica Neue',Helvetica,Arial,'Microsoft JhengHei','Noto Sans TC',sans-serif"
       : "'Helvetica Neue',Helvetica,Arial,sans-serif"
 
-  // 內文區塊切分（標題／段落）跟信件、CMS HTML、Word 共用同一套邏輯，見
-  // shared/emailTemplate.ts 的 splitMarkdownBlocks() 說明。
-  const blocks = splitMarkdownBlocks(input.bodyText).map((block) =>
-    block.type === 'heading'
-      ? `<h2>${escapeHtml(block.text)}</h2>`
-      : `<p>${linkifyHtml(block.text).replace(/\n/g, '<br>')}</p>`,
-  )
+  // 內文區塊切分（標題／段落／表格）跟信件、CMS HTML、Word 共用同一套
+  // 邏輯，見 shared/emailTemplate.ts 的 splitMarkdownBlocks() 說明。
+  const blocks = splitMarkdownBlocks(input.bodyText).map((block) => {
+    if (block.type === 'heading') return `<h2>${escapeHtml(block.text)}</h2>`
+    if (block.type === 'table') return renderTableHtmlForPdf(block.rows)
+    return `<p>${linkifyHtml(block.text).replace(/\n/g, '<br>')}</p>`
+  })
 
   const heroSrc = safeUrl(input.heroImageUrl)
   if (heroSrc) {
@@ -510,6 +728,9 @@ export function downloadPdf(input: TemplateInput, filename: string) {
   a { color: ${BRAND_COLOR}; text-decoration: underline; word-break: break-all; }
   .pic { text-align: center; margin: 16px 0 20px; }
   .pic img { max-width: 280px; height: auto; }
+  table { border-collapse: collapse; width: 100%; margin: 0 0 16px; }
+  th, td { border: 1px solid #e6e8ec; padding: 6px 10px; font-size: 10pt; text-align: left; }
+  th { background-color: ${BRAND_COLOR}; color: #ffffff; font-weight: 600; }
   .contact { margin-top: 28px; padding-top: 14px; border-top: 1px solid #e6e8ec; }
   .contact h3 { font-size: 10pt; color: ${BRAND_COLOR}; margin: 0 0 6px; }
   .contact p { margin: 0; font-size: 10pt; color: #4a505c; }

@@ -1,8 +1,9 @@
 /**
  * 新聞稿 email 樣板。
  *
- * 使用者只輸入純文字，這裡負責套上排版樣式。內文支援一種標記：
- * 以 `## ` 開頭的行會變成小標題。
+ * 使用者只輸入純文字，這裡負責套上排版樣式。內文支援兩種標記：
+ * 以 `## ` 開頭的行會變成小標題；GFM 風格的 pipe table（表頭列＋分隔列，
+ * 見 splitMarkdownBlocks() 的完整說明）會變成表格。
  *
  * ⚠️ 這支檔案與 functions/src/emailTemplate.ts 內容相同，
  * 前端用來預覽、Cloud Function 用來實際產生寄出的 HTML，兩邊要一起改。
@@ -239,7 +240,27 @@ export function splitLinks(text: string): { text: string; url?: string }[] {
  * 需要滿足「行首 ``` 判定為 code fence」這個單一規則就好，沒有必要為了
  * 假設性的未來需求擴大解析範圍。
  */
-export type MarkdownBlock = { type: 'heading'; text: string } | { type: 'paragraph'; text: string }
+export type MarkdownBlock =
+  | { type: 'heading'; text: string }
+  | { type: 'paragraph'; text: string }
+  | { type: 'table'; rows: string[][] }
+
+// round 34 新增：GFM 風格的 pipe table，要求「表頭列＋分隔列」齊全才算
+// 表格——只看一行以 `|` 開頭不夠，一般句子裡偶然出現的 `|`（例如「A|B
+// 二選一」）不該被誤判成表格，呼應既有 `## ` 前綴必須精確符合、不做寬鬆
+// 猜測的哲學。分隔列格式沿用 GFM 慣例：每一格是可選的 `:`、一個以上的
+// `-`、可選的 `:`，格與格之間用 `|` 分隔，前後的 `|` 可有可無。
+const TABLE_SEPARATOR_RE = /^\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?$/
+
+function isTableRowLine(line: string): boolean {
+  return line.trim().startsWith('|')
+}
+
+/** 把一行 pipe table 的原始文字拆成逐格內容（去頭尾 `|`，每格 trim）。 */
+function splitTableRow(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '')
+  return trimmed.split('|').map((cell) => cell.trim())
+}
 
 export function splitMarkdownBlocks(text: string): MarkdownBlock[] {
   const lines = text.replace(/\r\n/g, '\n').split('\n')
@@ -254,26 +275,47 @@ export function splitMarkdownBlocks(text: string): MarkdownBlock[] {
     paragraphLines = []
   }
 
-  for (const rawLine of lines) {
+  let i = 0
+  while (i < lines.length) {
+    const rawLine = lines[i]
+
     if (rawLine.startsWith('```')) {
       inFence = !inFence
       paragraphLines.push(rawLine)
+      i += 1
       continue
     }
     if (inFence) {
       paragraphLines.push(rawLine)
+      i += 1
       continue
     }
     if (rawLine.trim() === '') {
       flushParagraph()
+      i += 1
       continue
     }
     if (rawLine.startsWith('## ')) {
       flushParagraph()
       blocks.push({ type: 'heading', text: rawLine.slice(3).trim() })
+      i += 1
+      continue
+    }
+    // 只有「這行是 `|` 開頭，且緊接著下一行是合法的分隔列」才進入表格模式；
+    // 不符合就當成一般文字，不猜測、不誤判。
+    if (isTableRowLine(rawLine) && i + 1 < lines.length && TABLE_SEPARATOR_RE.test(lines[i + 1].trim())) {
+      flushParagraph()
+      const rows: string[][] = [splitTableRow(rawLine)]
+      i += 2 // 跳過表頭列與分隔列
+      while (i < lines.length && isTableRowLine(lines[i])) {
+        rows.push(splitTableRow(lines[i]))
+        i += 1
+      }
+      blocks.push({ type: 'table', rows })
       continue
     }
     paragraphLines.push(rawLine)
+    i += 1
   }
   flushParagraph()
 
@@ -281,21 +323,54 @@ export function splitMarkdownBlocks(text: string): MarkdownBlock[] {
 }
 
 /**
- * 把純文字切成區塊。空行分段；以 `## ` 開頭的行視為小標題（見上方
- * splitMarkdownBlocks() 的完整說明——這裡只負責把區塊轉成信件用的
- * HTML，不重複切分邏輯）。
+ * round 34 新增：把一個 table 區塊轉成行內樣式的 HTML `<table>`，供
+ * renderBlocks()（信件）使用。第一列固定當表頭（品牌色底、白字），其餘
+ * 列用既有信件慣用的 `#e6e8ec` 髮絲線分隔——跟其餘信件版面（頁首、圖片
+ * 說明）用同一組視覺語言。刻意不對儲存格內容呼叫 linkify()：表格通常放
+ * 數字/簡短文字，維持單純，不需要自動辨識網址。
+ */
+function renderTableHtml(rows: string[][], font: string): string {
+  const [header, ...body] = rows
+  const headerCells = (header ?? [])
+    .map(
+      (cell) =>
+        `<th style="padding:8px 12px;font-size:14px;line-height:1.5;font-weight:600;color:#ffffff;background-color:${BRAND_COLOR};font-family:${font};border:1px solid ${BRAND_COLOR};text-align:left;">${escapeHtml(cell)}</th>`,
+    )
+    .join('')
+  const bodyRows = body
+    .map(
+      (row) =>
+        `<tr>${row
+          .map(
+            (cell) =>
+              `<td style="padding:8px 12px;font-size:14px;line-height:1.5;color:#2b2f36;font-family:${font};border:1px solid #e6e8ec;">${escapeHtml(cell)}</td>`,
+          )
+          .join('')}</tr>`,
+    )
+    .join('')
+  return `<table cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;margin:0 0 16px;"><tr>${headerCells}</tr>${bodyRows}</table>`
+}
+
+/**
+ * 把純文字切成區塊。空行分段；以 `## ` 開頭的行視為小標題，pipe table
+ * 語法視為表格（見上方 splitMarkdownBlocks() 的完整說明——這裡只負責把
+ * 區塊轉成信件用的 HTML，不重複切分邏輯）。
  * 回傳陣列而非字串，方便呼叫端把圖片插在第一段之後。
  */
 export function renderBlocks(text: string, font: string): string[] {
-  return splitMarkdownBlocks(text).map((block) =>
-    block.type === 'heading'
-      ? `<h2 style="margin:28px 0 12px;font-size:16px;line-height:1.5;font-weight:600;color:${BRAND_COLOR};font-family:${font};">${escapeHtml(
-          block.text,
-        )}</h2>`
-      : `<p style="margin:0 0 16px;font-size:16px;line-height:1.8;color:#2b2f36;font-family:${font};">${linkify(
-          escapeHtml(block.text),
-        ).replace(/\n/g, '<br>')}</p>`,
-  )
+  return splitMarkdownBlocks(text).map((block) => {
+    if (block.type === 'heading') {
+      return `<h2 style="margin:28px 0 12px;font-size:16px;line-height:1.5;font-weight:600;color:${BRAND_COLOR};font-family:${font};">${escapeHtml(
+        block.text,
+      )}</h2>`
+    }
+    if (block.type === 'table') {
+      return renderTableHtml(block.rows, font)
+    }
+    return `<p style="margin:0 0 16px;font-size:16px;line-height:1.8;color:#2b2f36;font-family:${font};">${linkify(
+      escapeHtml(block.text),
+    ).replace(/\n/g, '<br>')}</p>`
+  })
 }
 
 /** 把一段純文字轉成乾淨的行內 HTML：跳脫文字、網址包成不含樣式的 <a>。 */
@@ -311,18 +386,30 @@ function bodyInlineHtml(text: string): string {
     .replace(/\n/g, '<br>')
 }
 
+/** round 34 新增：把一個 table 區塊轉成無樣式的 `<table>`，供 renderBodyHtml() 使用。 */
+function renderTableBodyHtml(rows: string[][]): string {
+  const [header, ...body] = rows
+  const headerRow = `<tr>${(header ?? []).map((cell) => `<th>${escapeHtml(cell)}</th>`).join('')}</tr>`
+  const bodyRows = body
+    .map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`)
+    .join('')
+  return `<table>${headerRow}${bodyRows}</table>`
+}
+
 /**
  * 把新聞稿內文轉成「乾淨、無行內樣式」的語意 HTML，供貼進外部 CMS 後台。
  *
- * 段落 → <p>；以「## 」開頭的行 → <h4>；網址 → <a>。
- * 刻意不加任何 style（跟寄信用的 renderBlocks 不同）—— CMS 有自己的樣式，
- * 帶樣式進去反而會打架。
+ * 段落 → <p>；以「## 」開頭的行 → <h4>；pipe table 語法 → <table>；
+ * 網址 → <a>。刻意不加任何 style（跟寄信用的 renderBlocks 不同）——
+ * CMS 有自己的樣式，帶樣式進去反而會打架。
  */
 export function renderBodyHtml(bodyText: string): string {
   return splitMarkdownBlocks(bodyText)
-    .map((block) =>
-      block.type === 'heading' ? `<h4>${escapeHtml(block.text)}</h4>` : `<p>${bodyInlineHtml(block.text)}</p>`,
-    )
+    .map((block) => {
+      if (block.type === 'heading') return `<h4>${escapeHtml(block.text)}</h4>`
+      if (block.type === 'table') return renderTableBodyHtml(block.rows)
+      return `<p>${bodyInlineHtml(block.text)}</p>`
+    })
     .join('\n')
 }
 
@@ -447,7 +534,14 @@ export function renderEmailHtml(input: TemplateInput): string {
 </html>`
 }
 
-/** 純文字備援版本，給不顯示 HTML 的信箱使用。 */
+/**
+ * 純文字備援版本，給不顯示 HTML 的信箱使用。
+ *
+ * round 34：刻意不呼叫 splitMarkdownBlocks() 處理 pipe table 語法——
+ * `| a | b |` 這種寫法本來就是人類讀得懂的純文字，原樣印出去已經夠用，
+ * 不需要額外轉換；只有 `## ` 這個標記需要拿掉，否則收件人會看到裸露的
+ * 記號。
+ */
 export function renderEmailText(input: TemplateInput): string {
   const copy = COPY[input.language]
   const c = input.contact
