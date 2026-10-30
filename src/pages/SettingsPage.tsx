@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   collection,
   deleteDoc,
+  deleteField,
   doc,
   onSnapshot,
   serverTimestamp,
@@ -24,6 +25,40 @@ import type { AppUser } from '../types'
 /** 名單頁只是顯示用，真正的判斷在 Cloud Functions。 */
 function canSendReal(role: string | undefined) {
   return hasPermission(role, 'sendReal')
+}
+
+/**
+ * 每位使用者的「測試信收件信箱」。失焦時儲存；留空代表清除、改寄登入信箱。
+ * key 綁著已儲存的值，存檔後（或存檔失敗被還原時）輸入框會跟著重設。
+ */
+function TestEmailInput({ user }: { user: AppUser }) {
+  async function commit(raw: string) {
+    const value = raw.trim()
+    if (value === (user.testEmail ?? '')) return
+    if (value && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) {
+      alert('請輸入正確的 Email 格式。')
+      return
+    }
+    await setDoc(
+      doc(db, 'users', user.email),
+      { testEmail: value ? value : deleteField() },
+      { merge: true },
+    )
+  }
+
+  return (
+    <TextInput
+      key={user.testEmail ?? ''}
+      type="email"
+      defaultValue={user.testEmail ?? ''}
+      placeholder={`未設定（寄到 ${user.email}）`}
+      onBlur={(e) => commit(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur()
+      }}
+      className="min-w-56"
+    />
+  )
 }
 
 export default function SettingsPage() {
@@ -235,6 +270,10 @@ export default function SettingsPage() {
                     {u.active ? '啟用中' : '已停用'}
                   </button>
                 </div>
+                <div className="mt-3">
+                  <div className="mb-1 text-xs text-slate-500">測試信收件信箱</div>
+                  <TestEmailInput user={u} />
+                </div>
               </div>
             ))}
           </div>
@@ -246,6 +285,7 @@ export default function SettingsPage() {
                 <th className="px-4 py-3 font-medium">名稱</th>
                 <th className="px-4 py-3 font-medium">Email</th>
                 <th className="px-4 py-3 font-medium">角色</th>
+                <th className="px-4 py-3 font-medium">測試信收件信箱</th>
                 <th className="px-4 py-3 font-medium">可發送</th>
                 <th className="px-4 py-3 font-medium">狀態</th>
                 <th className="px-4 py-3 text-right font-medium">操作</th>
@@ -277,6 +317,9 @@ export default function SettingsPage() {
                         </option>
                       ))}
                     </Select>
+                  </td>
+                  <td className="px-4 py-3">
+                    <TestEmailInput user={u} />
                   </td>
                   <td className="px-4 py-3">
                     {canSendReal(u.role) ? (

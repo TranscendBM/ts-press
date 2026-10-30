@@ -117,6 +117,22 @@ export function parseEmailList(raw: unknown): string[] {
 }
 
 /**
+ * 「寄測試信給我」實際寄到哪個信箱。
+ *
+ * 登入帳號不一定是公司信箱（有人用 Gmail 登入），所以管理員可以在
+ * users 文件另外指定 testEmail（公司信箱）。有指定且格式合法就寄到那裡，
+ * 否則維持寄到登入信箱，不會因為欄位髒了就讓測試信寄不出去。
+ */
+export function resolveSelfTestEmail(
+  loginEmail: string,
+  testEmail: unknown,
+): string {
+  if (typeof testEmail !== 'string') return loginEmail
+  const t = testEmail.trim()
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(t) ? t : loginEmail
+}
+
+/**
  * 展開「內部副本」收件人：把選取名單設定的公司同事攤平成清單。
  *
  * 每人只保留一份 —— excludeEmails（通常是媒體收件人）已經有的、以及跨名單

@@ -18,7 +18,7 @@ import {
   type ListId,
 } from '../constants'
 import type { EmailSettings, MediaContact, PressRelease } from '../types'
-import { expandInternalCopies } from '../../shared/policy'
+import { expandInternalCopies, resolveSelfTestEmail } from '../../shared/policy'
 import { blankVersions, formatBytes } from '../lib/helpers'
 
 type SendMode = 'self' | 'testList' | 'real'
@@ -299,7 +299,8 @@ export default function SendPage() {
                 寄給我自己
               </div>
               <p className="mb-3 text-xs text-slate-500">
-                已填寫的每個語言版本各寄一封到 {appUser?.email}，方便一次核對三個版本。
+                已填寫的每個語言版本各寄一封到{' '}
+                {resolveSelfTestEmail(appUser?.email ?? '', appUser?.testEmail)}，方便一次核對三個版本。
               </p>
               <Button
                 onClick={() => run('self')}

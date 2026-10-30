@@ -36,6 +36,7 @@ import {
   isAllowedAttachmentPath,
   isAllowedPressFilePath,
   parseEmailList,
+  resolveSelfTestEmail,
   type AppRole,
 } from './policy.generated'
 import {
@@ -111,6 +112,8 @@ import {
 interface AuthorizedUser {
   email: string
   displayName?: string
+  /** 管理員指定的測試信收件信箱（公司信箱），沒設就寄登入信箱。 */
+  testEmail?: string
   role?: AppRole
 }
 
@@ -1752,13 +1755,15 @@ async function buildRecipientPlan(opts: {
     if (filledLangs.length === 0) {
       throw new HttpsError('failed-precondition', '沒有任何已填寫的語言版本。')
     }
-    // 測試信收件人：登入者本人 + 後台「測試信收件人」設定的信箱，去重
+    // 測試信收件人：登入者本人（管理員有指定公司信箱就寄那裡）+
+    // 後台「測試信收件人」設定的信箱，去重
     const extras = parseEmailList(
       (await db.doc('settings/smtp').get()).data()?.testRecipients,
     )
     const seen = new Set<string>()
     const emails: string[] = []
-    for (const e of [opts.user.email, ...extras]) {
+    const own = resolveSelfTestEmail(opts.user.email, opts.user.testEmail)
+    for (const e of [own, ...extras]) {
       const key = e.toLowerCase()
       if (!seen.has(key)) {
         seen.add(key)
