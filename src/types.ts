@@ -18,6 +18,8 @@ export interface AppUser {
   displayName: string
   role: Role
   active: boolean
+  /** 「寄測試信給我」改寄到這個信箱（公司信箱）；沒設就寄登入信箱。 */
+  testEmail?: string
   createdAt?: Timestamp
 }
 

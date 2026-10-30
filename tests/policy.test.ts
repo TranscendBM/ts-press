@@ -8,7 +8,30 @@ import {
   isAllowedAttachmentPath,
   isAllowedPressFilePath,
   parseEmailList,
+  resolveSelfTestEmail,
 } from '../shared/policy'
+
+describe('resolveSelfTestEmail', () => {
+  const login = 'me@gmail.com'
+
+  it('管理員指定了公司信箱就寄那裡，不寄登入的 Gmail', () => {
+    expect(resolveSelfTestEmail(login, 'me@transcend-info.com')).toBe(
+      'me@transcend-info.com',
+    )
+  })
+
+  it('前後空白會被去掉', () => {
+    expect(resolveSelfTestEmail(login, '  me@transcend-info.com ')).toBe(
+      'me@transcend-info.com',
+    )
+  })
+
+  it('沒設定、空字串、格式不合法或型別不對都退回登入信箱', () => {
+    for (const v of [undefined, null, '', '  ', 'not-an-email', 'a@b', 'a b@c.com', 42, {}]) {
+      expect(resolveSelfTestEmail(login, v), String(v)).toBe(login)
+    }
+  })
+})
 
 describe('evaluateAccess', () => {
   const verified = { email: 'a@b.com', emailVerified: true }
